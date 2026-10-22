@@ -1,0 +1,39 @@
+# Drupal 10/11. Set DOCROOT=web (or backend/web, ...).
+server {
+	listen 80 default_server;
+	server_name _;
+	root /var/www/html/${DOCROOT};
+	index index.php;
+	client_max_body_size ${CLIENT_MAX_BODY_SIZE};
+
+	include /etc/nginx/conf.d/snippets/common-deny.conf;
+
+	location = /favicon.ico { log_not_found off; access_log off; }
+	location = /robots.txt  { allow all; log_not_found off; access_log off; }
+
+	# never execute uploaded PHP or serve private files directly
+	location ~ ^/sites/[^/]+/files/.*\.php$ { deny all; }
+	location ~ ^/sites/.*/private/ { return 403; }
+	location ~ \..*/.*\.php$ { return 403; }
+
+	location / { try_files $uri /index.php?$query_string; }
+	location @rewrite { rewrite ^ /index.php; }
+
+	# image styles are generated on first request
+	location ~ ^/sites/.*/files/styles/ { try_files $uri @rewrite; }
+	location ~ ^(/[a-z\-]+)?/system/files/ { try_files $uri /index.php?$query_string; }
+
+	location ~ '\.php$|^/update.php' {
+		fastcgi_split_path_info ^(.+?\.php)(|/.*)$;
+		try_files $fastcgi_script_name =404;
+		include /etc/nginx/conf.d/snippets/fastcgi-php.conf;
+		include /etc/nginx/conf.d/snippets/microcache.conf;
+	}
+
+	location ~* \.(?:css|js|png|jpe?g|gif|ico|svg|webp|avif|woff2?|ttf)$ {
+		expires 30d;
+		access_log off;
+		log_not_found off;
+		try_files $uri @rewrite;
+	}
+}

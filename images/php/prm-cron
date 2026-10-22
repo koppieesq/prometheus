@@ -1,0 +1,13 @@
+#!/bin/sh
+# Minimal in-container scheduler: run $CRON_COMMAND every $CRON_INTERVAL seconds.
+# For per-minute precision or multiple jobs, use host cron or a systemd timer instead.
+set -u
+: "${CRON_COMMAND:?CRON_COMMAND is required}"
+cd "${CRON_WORKDIR:-/var/www/html}" || exit 1
+trap 'exit 0' TERM INT
+while :; do
+  echo "[cron] $(date -u +%Y-%m-%dT%H:%M:%SZ) start: ${CRON_COMMAND}"
+  sh -c "${CRON_COMMAND}" || echo "[cron] command exited non-zero"
+  sleep "${CRON_INTERVAL:-900}" &
+  wait $!
+done

@@ -1,0 +1,42 @@
+# Shared edge proxy: the ONLY thing that publishes ports 80/443 on the host.
+# Terminates TLS (automatic Let's Encrypt), compresses, adds security headers,
+# and routes by hostname to each site's nginx over the shared "edge" network.
+#
+#   prm edge up        (creates the network, starts Caddy)
+#   prm edge reload    (after adding/removing a site snippet)
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    init: true
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in edge/.env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./sites:/etc/caddy/sites:ro
+      - caddy_data:/data # certificates: back this up or accept re-issuing
+      - caddy_config:/config
+    networks: [edge]
+    mem_limit: 128m
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  edge:
+    name: ${EDGE_NETWORK:-edge}
+    external: true # created by `prm edge up` / bootstrap-vps.sh

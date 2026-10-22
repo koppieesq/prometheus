@@ -1,0 +1,5 @@
+# hidden files (but allow /.well-known/)
+location ~* /\.(?!well-known) { deny all; }
+# backup / config / source leftovers
+location ~* \.(?:bak|conf|dist|ini|log|sh|sql|sw[op])$|~$ { deny all; }
+location = /healthz { access_log off; default_type text/plain; return 200 "ok\n"; }

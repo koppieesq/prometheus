@@ -1,0 +1,20 @@
+# Static single-page app only (Vite/React/Vue build output in SPA_ROOT).
+server {
+	listen 80 default_server;
+	server_name _;
+	root /var/www/html/${SPA_ROOT};
+	index index.html;
+
+	include /etc/nginx/conf.d/snippets/common-deny.conf;
+
+	location / { try_files $uri $uri/ /index.html; }
+	location = /index.html { add_header Cache-Control "no-store"; }
+	# Vite emits content-hashed files under /assets/
+	location ^~ /assets/ { expires 1y; add_header Cache-Control "public, immutable"; access_log off; }
+	# Runtime config: one build, many deployments (no baked-in URLs).
+	location = /config.js {
+		default_type application/javascript;
+		add_header Cache-Control "no-store";
+		return 200 'window.__CONFIG__ = { apiBase: "${PUBLIC_API_BASE}" };\n';
+	}
+}

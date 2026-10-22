@@ -1,0 +1,212 @@
+# One self-contained LEMP stack per site. Run it through `bin/prm` so env,
+# project name, profiles and overlays are wired up consistently:
+#
+#   prm new blog blog.example.com drupal
+#   prm blog up
+#
+# Services: web (nginx) -> php (php-fpm) -> db (mariadb)
+# Optional (compose profiles, set COMPOSE_PROFILES in site.env):
+#   cache  valkey object cache
+#   cron   periodic command (e.g. drush cron) in the php image
+#   ws     a Node websocket server proxied at /ws
+# On demand (prm <site> composer|drush|npm ...): tools, node
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+x-base: &base
+  restart: unless-stopped
+  init: true
+  logging: *logging
+  security_opt: ["no-new-privileges:true"]
+  networks: [internal]
+
+x-php-env: &php-env
+  TZ: ${TZ:-UTC}
+  APP_ENV: ${APP_ENV:-production}
+  DB_HOST: db
+  DB_PORT: "3306"
+  DB_NAME: ${DB_NAME:-app}
+  DB_USER: ${DB_USER:-app}
+  DB_PASSWORD_FILE: /run/secrets/db_password
+  REDIS_HOST: valkey # only resolves with the "cache" profile
+  PHP_MEMORY_LIMIT: ${PHP_MEMORY_LIMIT:-256M}
+  PHP_UPLOAD_MAX: ${PHP_UPLOAD_MAX:-32M}
+  PHP_MAX_EXECUTION_TIME: ${PHP_MAX_EXECUTION_TIME:-60}
+  PHP_OPCACHE_VALIDATE: ${PHP_OPCACHE_VALIDATE:-0}
+  PHP_FPM_PM: ${PHP_FPM_PM:-ondemand}
+  PHP_FPM_MAX_CHILDREN: ${PHP_FPM_MAX_CHILDREN:-6}
+  PHP_FPM_TIMEOUT: ${PHP_FPM_TIMEOUT:-120s}
+
+x-php: &php
+  image: prm/php:${PHP_VERSION:-8.4}
+  build:
+    context: ../images/php
+    target: runtime
+    args: { PHP_VERSION: "${PHP_VERSION:-8.4}" }
+  environment: *php-env
+  secrets: [db_password]
+  volumes:
+    - ${SITE_DIR:?run via bin/prm}/app:/var/www/html:${APP_MODE:-ro}
+    - ${SITE_DIR}/files:/var/www/html/${FILES_PATH:-public/files}
+    - ${SITE_DIR}/php.ini:/usr/local/etc/php/conf.d/99-site.ini:ro
+
+services:
+  web:
+    <<: *base
+    image: nginx:${NGINX_VERSION:-1.28}-alpine
+    depends_on:
+      php: { condition: service_healthy }
+    environment:
+      NGINX_ENVSUBST_FILTER: "^(DOCROOT|SPA_ROOT|CLIENT_MAX_BODY_SIZE|MICROCACHE_ZONE|MICROCACHE_TTL|BACKEND_PATHS|PUBLIC_API_BASE)$$"
+      DOCROOT: ${DOCROOT:-public}
+      SPA_ROOT: ${SPA_ROOT:-dist}
+      CLIENT_MAX_BODY_SIZE: ${PHP_UPLOAD_MAX:-32M}
+      MICROCACHE_ZONE: ${MICROCACHE_ZONE:-micro} # "off" disables the anonymous microcache
+      MICROCACHE_TTL: ${MICROCACHE_TTL:-5s}
+      BACKEND_PATHS: ${BACKEND_PATHS:-jsonapi|user|admin|core|sites|modules|themes|libraries|oauth|session|node|system|batch|contextual|filter}
+      PUBLIC_API_BASE: ${PUBLIC_API_BASE:-/}
+    volumes:
+      - ${SITE_DIR}/app:/var/www/html:ro
+      - ${SITE_DIR}/files:/var/www/html/${FILES_PATH:-public/files}:ro
+      - ./nginx/nginx-global.conf:/etc/nginx/conf.d/00-global.conf:ro
+      - ./nginx/apps/${APP_TYPE:-generic}.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./nginx/snippets:/etc/nginx/templates/snippets:ro
+    tmpfs:
+      - /var/cache/nginx/micro:size=64m
+    networks:
+      internal: {}
+      edge:
+        aliases: ["${SITE_NAME:?run via bin/prm}-web"]
+    mem_limit: ${WEB_MEM_LIMIT:-96m}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  php:
+    <<: [*base, *php]
+    depends_on:
+      db: { condition: service_healthy }
+    mem_limit: ${PHP_MEM_LIMIT:-640m}
+    healthcheck:
+      test: ["CMD-SHELL", "SCRIPT_NAME=/ping SCRIPT_FILENAME=/ping REQUEST_METHOD=GET cgi-fcgi -bind -connect 127.0.0.1:9000 | grep -q pong"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  db:
+    <<: *base
+    image: mariadb:${MARIADB_VERSION:-11.8}
+    command:
+      - --innodb-buffer-pool-size=${DB_BUFFER_POOL:-128M}
+      - --max-connections=${DB_MAX_CONNECTIONS:-60}
+    environment:
+      TZ: ${TZ:-UTC}
+      MARIADB_DATABASE: ${DB_NAME:-app}
+      MARIADB_USER: ${DB_USER:-app}
+      MARIADB_PASSWORD_FILE: /run/secrets/db_password
+      MARIADB_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+      MARIADB_AUTO_UPGRADE: "1"
+    secrets: [db_password, db_root_password]
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./mariadb/prm.cnf:/etc/mysql/conf.d/prm.cnf:ro
+    mem_limit: ${DB_MEM_LIMIT:-384m}
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  valkey:
+    <<: *base
+    profiles: [cache]
+    image: valkey/valkey:8-alpine
+    command: ["valkey-server", "--maxmemory", "${VALKEY_MAXMEMORY:-48mb}", "--maxmemory-policy", "allkeys-lru", "--save", ""]
+    mem_limit: ${VALKEY_MEM_LIMIT:-96m}
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+
+  cron:
+    <<: [*base, *php]
+    profiles: [cron]
+    command: ["prm-cron"]
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      <<: *php-env
+      CRON_COMMAND: ${CRON_COMMAND:-true}
+      CRON_INTERVAL: ${CRON_INTERVAL:-900}
+      CRON_WORKDIR: ${CRON_WORKDIR:-/var/www/html}
+    mem_limit: ${CRON_MEM_LIMIT:-384m}
+    healthcheck: { disable: true }
+
+  ws:
+    <<: *base
+    profiles: [ws]
+    image: node:${NODE_VERSION:-22}-alpine
+    working_dir: /var/www/html/${WS_DIR:-ws-server}
+    command: ["sh", "-c", "${WS_COMMAND:-node server.js}"]
+    user: node
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+    volumes:
+      - ${SITE_DIR}/app:/var/www/html:ro
+    mem_limit: ${WS_MEM_LIMIT:-128m}
+
+  # --- on-demand tooling (never started by `up`) -----------------------------
+  tools:
+    <<: [*base, *php]
+    profiles: [tools]
+    build:
+      context: ../images/php
+      target: tools
+      args: { PHP_VERSION: "${PHP_VERSION:-8.4}" }
+    image: prm/php-tools:${PHP_VERSION:-8.4}
+    restart: "no"
+    volumes:
+      - ${SITE_DIR}/app:/var/www/html:rw
+      - ${SITE_DIR}/files:/var/www/html/${FILES_PATH:-public/files}
+      - ${SITE_DIR}/php.ini:/usr/local/etc/php/conf.d/99-site.ini:ro
+      - composer_cache:/tmp/composer
+    environment:
+      <<: *php-env
+      COMPOSER_HOME: /tmp/composer
+    healthcheck: { disable: true }
+
+  node:
+    <<: *base
+    profiles: [tools]
+    image: node:${NODE_VERSION:-22}-alpine
+    restart: "no"
+    working_dir: /var/www/html
+    volumes:
+      - ${SITE_DIR}/app:/var/www/html:rw
+      - npm_cache:/root/.npm
+
+secrets:
+  db_password:
+    file: ${SITE_DIR}/secrets/db_password
+  db_root_password:
+    file: ${SITE_DIR}/secrets/db_root_password
+
+volumes:
+  db_data:
+  composer_cache:
+  npm_cache:
+
+networks:
+  internal: {}
+  edge:
+    name: ${EDGE_NETWORK:-edge}
+    external: true

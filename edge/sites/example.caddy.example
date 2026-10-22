@@ -1,0 +1,5 @@
+# `prm new <site> <domain>` writes one of these per site (as <site>.caddy).
+example.com, www.example.com {
+	import common
+	reverse_proxy mysite-web:80
+}
