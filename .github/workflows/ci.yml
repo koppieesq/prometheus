@@ -7,7 +7,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: shellcheck
         run: shellcheck bin/prm scripts/*.sh images/php/prm-cron
       - name: compose config (stack)
@@ -27,7 +27,7 @@ jobs:
     env:
       PRM_HARDENED: ${{ matrix.hardened }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: create site from the hello example
         run: bin/prm new ci ci.example.com --example hello
       - name: up
