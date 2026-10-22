@@ -1,0 +1,10 @@
+# per-host state: never commit
+/sites/*
+!/sites/.gitkeep
+/edge/sites/*.caddy
+/edge/.env
+*.env
+!*.env.example
+/backups/
+node_modules/
+.DS_Store
