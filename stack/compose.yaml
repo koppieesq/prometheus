@@ -153,7 +153,7 @@ services:
   ws:
     <<: *base
     profiles: [ws]
-    image: node:${NODE_VERSION:-22}-alpine
+    image: node:${NODE_VERSION:-24}-alpine
     working_dir: /var/www/html/${WS_DIR:-ws-server}
     command: ["sh", "-c", "${WS_COMMAND:-node server.js}"]
     user: node
@@ -187,7 +187,7 @@ services:
   node:
     <<: *base
     profiles: [tools]
-    image: node:${NODE_VERSION:-22}-alpine
+    image: node:${NODE_VERSION:-24}-alpine
     restart: "no"
     working_dir: /var/www/html
     volumes:
