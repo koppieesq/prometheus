@@ -1,0 +1,47 @@
+name: ci
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck bin/prm scripts/*.sh images/php/prm-cron
+      - name: compose config (stack)
+        run: |
+          printf 'SITE_NAME=ci\nSITE_DIR=/tmp/ci\n' > /tmp/ci.env
+          docker compose --env-file /tmp/ci.env -f stack/compose.yaml config -q
+          docker compose --env-file /tmp/ci.env -f stack/compose.yaml -f stack/compose.hardened.yaml config -q
+      - name: compose config (edge)
+        run: ACME_EMAIL=ci@example.com docker compose -f edge/compose.yaml config -q
+
+  smoke:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        hardened: ["0", "1"]
+    env:
+      PRM_HARDENED: ${{ matrix.hardened }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: create site from the hello example
+        run: bin/prm new ci ci.example.com --example hello
+      - name: up
+        run: bin/prm ci up --wait --wait-timeout 180
+      - name: check response
+        run: |
+          out="$(bin/prm ci exec -T web wget -qO- http://127.0.0.1/)"
+          echo "$out"
+          echo "$out" | grep -q 'db: ok'
+          echo "$out" | grep -q 'files: ok'
+      - name: backup and restore round trip
+        run: |
+          bin/prm ci backup
+          PRM_YES=1 bin/prm ci restore "$(ls -1t sites/ci/backups/db-*.sql.gz | head -1)"
+      - name: logs on failure
+        if: failure()
+        run: bin/prm ci logs --tail 100

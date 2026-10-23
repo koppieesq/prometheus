@@ -1,0 +1,26 @@
+# Front-controller PHP app (Laravel, Symfony, Slim, plain PHP...). Set DOCROOT.
+server {
+	listen 80 default_server;
+	server_name _;
+	root /var/www/html/${DOCROOT};
+	index index.php index.html;
+	client_max_body_size ${CLIENT_MAX_BODY_SIZE};
+
+	include /etc/nginx/conf.d/snippets/common-deny.conf;
+
+	location / { try_files $uri $uri/ /index.php?$query_string; }
+
+	location ~ \.php$ {
+		fastcgi_split_path_info ^(.+\.php)(/.+)$;
+		try_files $fastcgi_script_name =404;
+		include /etc/nginx/conf.d/snippets/fastcgi-php.conf;
+		include /etc/nginx/conf.d/snippets/microcache.conf;
+	}
+
+	location ~* \.(?:css|js|mjs|png|jpe?g|gif|ico|svg|webp|avif|woff2?|ttf)$ {
+		expires 30d;
+		access_log off;
+		log_not_found off;
+		try_files $uri =404;
+	}
+}

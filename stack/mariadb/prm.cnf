@@ -1,0 +1,17 @@
+[mysqld]
+character-set-server = utf8mb4
+collation-server     = utf8mb4_unicode_ci
+skip-name-resolve
+performance_schema   = OFF        # saves ~100MB+ on small hosts; turn on to debug
+innodb_file_per_table = 1
+innodb_log_file_size  = 64M
+# innodb_flush_log_at_trx_commit = 2   # faster, risks ~1s of commits on power loss
+table_open_cache  = 1000
+tmp_table_size    = 32M
+max_heap_table_size = 32M
+slow_query_log    = ON
+slow_query_log_file = /var/lib/mysql/slow.log
+long_query_time   = 1
+
+[client]
+default-character-set = utf8mb4

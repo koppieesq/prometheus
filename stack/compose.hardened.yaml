@@ -1,0 +1,22 @@
+# Opt-in hardening overlay (PRM_HARDENED=1). Drops all Linux capabilities and
+# adds back only what each image's entrypoint needs. Exercised in CI; it will
+# become the default once that has been green for a while.
+services:
+  web:
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID, NET_BIND_SERVICE]
+    pids_limit: 128
+  php:
+    cap_drop: [ALL]
+    cap_add: [SETGID, SETUID]
+    pids_limit: 256
+  cron:
+    cap_drop: [ALL]
+    cap_add: [SETGID, SETUID]
+  db:
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID, DAC_OVERRIDE, FOWNER]
+    pids_limit: 512
+  valkey:
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]

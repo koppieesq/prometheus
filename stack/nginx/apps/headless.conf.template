@@ -1,0 +1,47 @@
+# Headless: SPA at /, Drupal (or any PHP API) under BACKEND_PATHS, Node websocket at /ws.
+# Everything is one origin, so no CORS configuration is needed.
+server {
+	listen 80 default_server;
+	server_name _;
+	root /var/www/html/${SPA_ROOT};
+	index index.html;
+	client_max_body_size ${CLIENT_MAX_BODY_SIZE};
+
+	include /etc/nginx/conf.d/snippets/common-deny.conf;
+
+	# --- backend (PHP) ---
+	location ~ ^/(${BACKEND_PATHS})(/|$) {
+		root /var/www/html/${DOCROOT};
+		try_files $uri /index.php?$query_string;
+	}
+	location ~ ^/sites/[^/]+/files/.*\.php$ { deny all; }
+	location ~ '\.php$|^/update.php' {
+		root /var/www/html/${DOCROOT};
+		fastcgi_split_path_info ^(.+?\.php)(|/.*)$;
+		try_files $fastcgi_script_name =404;
+		include /etc/nginx/conf.d/snippets/fastcgi-php.conf;
+		include /etc/nginx/conf.d/snippets/microcache.conf;
+	}
+
+	# --- websocket (resolved at request time; 502 if the ws profile is off) ---
+	location /ws {
+		set $ws_upstream http://ws:3000;
+		proxy_pass $ws_upstream;
+		proxy_http_version 1.1;
+		proxy_set_header Upgrade $http_upgrade;
+		proxy_set_header Connection $connection_upgrade;
+		proxy_set_header Host $host;
+		proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+		proxy_read_timeout 3600s;
+	}
+
+	# --- SPA ---
+	location / { try_files $uri $uri/ /index.html; }
+	location = /index.html { add_header Cache-Control "no-store"; }
+	location ^~ /assets/ { expires 1y; add_header Cache-Control "public, immutable"; access_log off; }
+	location = /config.js {
+		default_type application/javascript;
+		add_header Cache-Control "no-store";
+		return 200 'window.__CONFIG__ = { apiBase: "${PUBLIC_API_BASE}" };\n';
+	}
+}

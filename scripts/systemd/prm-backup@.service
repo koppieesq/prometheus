@@ -1,0 +1,10 @@
+[Unit]
+Description=prm backup for site %i
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Adjust the path if you cloned somewhere other than /opt/prometheus.
+ExecStart=/opt/prometheus/bin/prm %i backup
+Nice=10

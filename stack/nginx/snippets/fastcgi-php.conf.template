@@ -1,0 +1,12 @@
+include fastcgi_params;
+fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+fastcgi_param PATH_INFO $fastcgi_path_info;
+fastcgi_param HTTPS $prm_https;
+fastcgi_param HTTP_AUTHORIZATION $http_authorization;
+set $php_upstream php:9000;
+fastcgi_pass $php_upstream;
+fastcgi_index index.php;
+fastcgi_buffers 16 16k;
+fastcgi_buffer_size 32k;
+fastcgi_read_timeout 120s;
+fastcgi_intercept_errors off;
