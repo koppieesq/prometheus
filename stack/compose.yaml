@@ -31,6 +31,7 @@ x-php-env: &php-env
   DB_USER: ${DB_USER:-app}
   DB_PASSWORD_FILE: /run/secrets/db_password
   REDIS_HOST: valkey # only resolves with the "cache" profile
+  DRUPAL_HASH_SALT: ${DRUPAL_HASH_SALT:-} # set in site.env for the drupal/headless types
   PHP_MEMORY_LIMIT: ${PHP_MEMORY_LIMIT:-256M}
   PHP_UPLOAD_MAX: ${PHP_UPLOAD_MAX:-32M}
   PHP_MAX_EXECUTION_TIME: ${PHP_MAX_EXECUTION_TIME:-60}
