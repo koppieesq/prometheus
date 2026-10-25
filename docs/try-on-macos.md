@@ -90,8 +90,27 @@ ddev poweroff
 
 ## Teardown
 
+One site, leaving the edge up for the others:
+
 ```sh
-bin/prm hello down -v      # containers, volumes, the site's network
-bin/prm edge down
-sudo rm -rf sites/hello    # only if you created it as root; otherwise plain rm -rf
+bin/prm <name> down -v                       # containers, db volume, the site's network
+docker volume rm <name>_composer_cache       # only if you ran composer or drush; `down -v` misses
+                                             # it, because the tools profile is not active
+chmod -R u+w sites/<name>                    # only if Drupal installed: it hardens
+                                             # web/sites/default to 0555
+rm -rf sites/<name> edge/sites/<name>.caddy
+bin/prm edge reload                          # stop routing the hostname
 ```
+
+Both middle steps are conditional, and skipping the `chmod` on an installed Drupal site is the one
+that bites: `rm -rf` stops part-way with `Permission denied` and leaves the directory behind.
+`prm demo` prints the full sequence for the site it just made.
+
+Then the shared edge itself, once no sites are left:
+
+```sh
+bin/prm edge down
+```
+
+A site you created as root needs `sudo rm -rf sites/<name>` instead — root ignores the mode bits,
+so no `chmod` first. See the no-sudo rule above for why you should not be in that position.

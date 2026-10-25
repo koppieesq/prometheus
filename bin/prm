@@ -208,7 +208,9 @@ EOF
 
   info "demo site ready: https://$domain/  (admin / $DEMO_PASS)"
   info "the certificate is from caddy's internal CA, so curl needs -k"
-  info "remove it with: prm $site down -v && chmod -R u+w $dir && rm -rf $dir $EDGE_DIR/sites/$site.caddy"
+  info "remove it with:"
+  info "  prm $site down -v && docker volume rm ${site}_composer_cache"
+  info "  chmod -R u+w $dir && rm -rf $dir $EDGE_DIR/sites/$site.caddy && prm edge reload"
 }
 
 cmd_ls() {
