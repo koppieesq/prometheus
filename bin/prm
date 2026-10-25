@@ -199,7 +199,7 @@ EOF
   dc "$site" run --rm -T -w /var/www/html tools vendor/bin/drush site:install standard -y \
     --account-name=admin --account-pass="$DEMO_PASS" --site-name="$site" >&2
 
-  cmd_site "$site" up   # not --wait: compose exits 1 if any service disables its healthcheck (cron)
+  cmd_site "$site" up --wait
   if docker compose -p prm-edge -f "$EDGE_DIR/compose.yaml" ps -q caddy 2>/dev/null | grep -q .; then
     cmd_edge reload
   else

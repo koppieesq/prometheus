@@ -149,7 +149,6 @@ services:
       CRON_INTERVAL: ${CRON_INTERVAL:-900}
       CRON_WORKDIR: ${CRON_WORKDIR:-/var/www/html}
     mem_limit: ${CRON_MEM_LIMIT:-384m}
-    healthcheck: { disable: true }
 
   ws:
     <<: *base
