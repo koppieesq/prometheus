@@ -61,7 +61,9 @@ No VPS handy? The whole stack also comes up on a Mac under colima or Docker Desk
 bin/prm new blog blog.example.com --type drupal --size small
 # put your code in sites/blog/app   (git clone, rsync, CI deploy...)
 bin/prm blog composer install --no-dev
-bin/prm blog deploy                       # db up -> DEPLOY_COMMAND (e.g. drush deploy) -> up -> restart php
+# first run only: wire settings.php (see examples/drupal/README.md), then install or restore
+bin/prm blog drush site:install           # ...or: bin/prm blog restore db-*.sql.gz
+bin/prm blog deploy                       # every deploy after that: db up -> DEPLOY_COMMAND -> up -> restart php
 bin/prm edge reload
 ```
 

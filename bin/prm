@@ -53,6 +53,10 @@ prepare_site_dirs() { # the nested files mount needs its target to exist inside 
   [ -f "$dir/php.ini" ] || : > "$dir/php.ini"
 }
 
+ensure_db() { # drush and deploy both talk to the database; starting it is not the caller's job
+  dc "$1" up -d --build --wait db
+}
+
 random_secret() { openssl rand -base64 33 2>/dev/null | tr -d '\n=+/' | cut -c1-40 || head -c 30 /dev/urandom | base64 | tr -d '\n=+/'; }
 
 cmd_new() {
@@ -213,11 +217,11 @@ cmd_site() {
     sh)      dc "$site" exec php bash;;
     compose) dc "$site" "$@";;
     composer) dc "$site" run --rm tools composer "$@";;
-    drush)   dc "$site" run --rm -w "${PRM_WORKDIR:-/var/www/html}" tools vendor/bin/drush "$@";;
+    drush)   ensure_db "$site"; dc "$site" run --rm -w "${PRM_WORKDIR:-/var/www/html}" tools vendor/bin/drush "$@";;
     npm|npx|node) dc "$site" run --rm node "$sub" "$@";;
     deploy)
       local cmd; cmd="$(envget "$(site_env "$site")" DEPLOY_COMMAND)"
-      dc "$site" up -d --build --wait db
+      ensure_db "$site"
       if [ -n "$cmd" ]; then info "running deploy command: $cmd"; dc "$site" run --rm tools sh -c "$cmd"; fi
       dc "$site" up -d --build --remove-orphans
       dc "$site" restart php   # clears opcache when PHP_OPCACHE_VALIDATE=0

@@ -8,6 +8,27 @@ bin/prm blog up
 bin/prm edge reload
 ```
 
+`deploy` (`drush deploy` = updatedb, config:import, cache:rebuild) only maintains a site that
+already exists. A brand-new one needs `bin/prm blog drush site:install` once, after settings.php is
+wired; an existing one needs its database restored (`bin/prm blog restore db-*.sql.gz`). Running
+`deploy` first on an empty database fails at bootstrap.
+
+Starting from nothing rather than from a git clone needs a detour. `prm new` pre-creates
+`app/<FILES_PATH>`, and the uploads bind mount recreates it inside the container, so `/var/www/html`
+is never empty and `composer create-project` refuses to target it:
+
+```sh
+bin/prm blog compose run --rm tools sh -c '
+  composer create-project drupal/recommended-project /tmp/new --no-interaction
+  cd /tmp/new && composer require drush/drush
+  cp -a /tmp/new/. /var/www/html/
+'
+```
+
+`drupal/recommended-project` is a project *template* (`"type": "project"`), so it only works with
+`create-project` — `composer require`-ing it installs a template into `vendor/` and gives you no
+docroot.
+
 Then in `web/sites/default/settings.php` (or a `settings.prm.php` include):
 
 ```php
