@@ -55,6 +55,40 @@ Point DNS A/AAAA records at the VPS first, or Let's Encrypt will not issue certi
 No VPS handy? The whole stack also comes up on a Mac under colima or Docker Desktop:
 [docs/try-on-macos.md](docs/try-on-macos.md).
 
+## Quick start 2: Drupal
+
+Clone the project as above, and then:
+
+```shell
+bin/prm new test1 test1.localhost --type drupal
+
+# Scaffold Drupal. `prm new` pre-creates app/web/sites/default/files and the uploads
+# mount recreates it in the container, so /var/www/html is never empty and
+# create-project cannot target it: build in /tmp and copy the contents up.
+bin/prm test1 compose run --rm tools sh -c '
+  composer create-project drupal/recommended-project /tmp/new --no-interaction
+  cd /tmp/new && composer require drush/drush
+  cp -a /tmp/new/. /var/www/html/
+'
+
+# Database credentials, hash salt, trusted host. Full block: examples/drupal/README.md
+echo "DRUPAL_HASH_SALT=$(openssl rand -hex 32)" >> sites/test1/site.env
+cp sites/test1/app/web/sites/default/default.settings.php \
+   sites/test1/app/web/sites/default/settings.php
+$EDITOR sites/test1/app/web/sites/default/settings.php
+
+bin/prm test1 drush site:install          # starts the db on its own
+bin/prm test1 up
+bin/prm edge reload
+curl -k https://test1.localhost/          # -k: the cert comes from Caddy's internal CA
+```
+
+`drupal/recommended-project` is a project *template*, so it only works through
+`create-project` — `composer require`-ing it, or letting create-project default to a
+`recommended-project/` subdirectory, leaves prm with no `composer.json` or docroot where
+`DOCROOT=web` expects them. `deploy` comes later: it is `drush deploy` (updatedb,
+config:import, cache:rebuild), which maintains a site that already exists.
+
 ## Your own site
 
 ```sh
