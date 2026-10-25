@@ -57,37 +57,36 @@ No VPS handy? The whole stack also comes up on a Mac under colima or Docker Desk
 
 ## Quick start 2: Drupal
 
-Clone the project as above, and then:
+One command, from nothing to an installed Drupal 11 site served over HTTPS:
 
 ```shell
-bin/prm new test1 test1.localhost --type drupal
-
-# Scaffold Drupal. `prm new` pre-creates app/web/sites/default/files and the uploads
-# mount recreates it in the container, so /var/www/html is never empty and
-# create-project cannot target it: build in /tmp and copy the contents up.
-bin/prm test1 compose run --rm tools sh -c '
-  composer create-project drupal/recommended-project /tmp/new --no-interaction
-  cd /tmp/new && composer require drush/drush
-  cp -a /tmp/new/. /var/www/html/
-'
-
-# Database credentials, hash salt, trusted host. Full block: examples/drupal/README.md
-echo "DRUPAL_HASH_SALT=$(openssl rand -hex 32)" >> sites/test1/site.env
-cp sites/test1/app/web/sites/default/default.settings.php \
-   sites/test1/app/web/sites/default/settings.php
-$EDITOR sites/test1/app/web/sites/default/settings.php
-
-bin/prm test1 drush site:install          # starts the db on its own
-bin/prm test1 up
-bin/prm edge reload
-curl -k https://test1.localhost/          # -k: the cert comes from Caddy's internal CA
+bin/prm edge up          # once per host
+bin/prm demo demo1
+curl -k https://demo1.localhost/
 ```
 
-`drupal/recommended-project` is a project *template*, so it only works through
-`create-project` — `composer require`-ing it, or letting create-project default to a
-`recommended-project/` subdirectory, leaves prm with no `composer.json` or docroot where
-`DOCROOT=web` expects them. `deploy` comes later: it is `drush deploy` (updatedb,
-config:import, cache:rebuild), which maintains a site that already exists.
+`prm demo <name>` is a smoke test, not a deploy path. It takes a single name and derives
+everything else from it: the site is `<name>`, the domain is `<name>.localhost`, the type is
+`drupal`. It scaffolds `drupal/recommended-project` plus drush, generates a hash salt and a
+`settings.php` wired to the stack's database secret, runs `drush site:install`, starts the
+containers and reloads the edge. It finishes in about a minute and a half on a warm composer
+cache, and prints the URL and the admin login.
+
+The certificate comes from Caddy's internal CA, so `curl` needs `-k` and a browser will warn
+until you trust that CA ([docs/try-on-macos.md](docs/try-on-macos.md)).
+
+The admin password is `admin`; override it with `PRM_DEMO_PASS`. Never point this at a real
+domain. To remove the site:
+
+```shell
+bin/prm demo1 down -v
+chmod -R u+w sites/demo1 && rm -rf sites/demo1 edge/sites/demo1.caddy
+```
+
+The `chmod` is needed because Drupal hardens `web/sites/default` to `0555` during install.
+
+For a site you intend to keep, see [examples/drupal/README.md](examples/drupal/README.md) and
+"Your own site" below: the same steps, but with your own repository in `sites/<name>/app`.
 
 ## Your own site
 

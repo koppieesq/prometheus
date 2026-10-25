@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # prm - run several small LEMP sites on one VPS.
 #   prm new <site> <domain[,domain...]> [--type generic|drupal|headless|spa] [--size small|medium|large] [--example hello]
+#   prm demo <name>                     throwaway Drupal site on <name>.localhost, installed and serving
 #   prm ls
 #   prm edge up|down|reload|logs|ps
 #   prm <site> up|down|restart|ps|logs|deploy|backup|restore <file>|sh|exec|compose ...
@@ -12,6 +13,7 @@ SITES_DIR="${PRM_SITES_DIR:-$ROOT/sites}"
 STACK="$ROOT/stack/compose.yaml"
 HARDENED="$ROOT/stack/compose.hardened.yaml"
 EDGE_DIR="$ROOT/edge"
+DEMO_PASS="${PRM_DEMO_PASS:-admin}" # `prm demo` only; never used by a real site
 
 die()  { echo "prm: $*" >&2; exit 1; }
 info() { echo "==> $*" >&2; }
@@ -145,6 +147,70 @@ EOF
   info "next: put your app in $dir/app, then: prm $site up && prm edge reload"
 }
 
+cmd_demo() { # one command from nothing to a working Drupal site, for kicking the tyres
+  local site="${1:-}"
+  [ -n "$site" ] || die "usage: prm demo <name>   (serves it on <name>.localhost)"
+  [ $# -le 1 ] || die "prm demo takes a single name; the domain is always <name>.localhost"
+  local domain="$site.localhost" dir="$SITES_DIR/$site"
+
+  cmd_new "$site" "$domain" --type drupal
+  printf 'DRUPAL_HASH_SALT=%s\n' "$(random_secret)" >> "$dir/site.env"
+
+  # create-project refuses a non-empty target and the uploads mount keeps
+  # /var/www/html non-empty, so build in /tmp and copy the contents up.
+  info "scaffolding drupal (first run downloads a few hundred MB)"
+  dc "$site" run --rm -T tools sh -c '
+    set -e
+    composer create-project drupal/recommended-project /tmp/new --no-interaction -q
+    cd /tmp/new && composer require -q drush/drush
+    cp -R /tmp/new/. /var/www/html/   # -R not -a: preserving times across the mount can fail
+  '
+
+  info "writing settings.php"
+  mkdir -p "$dir/app/config/sync"
+  local d="$dir/app/web/sites/default"
+  cp "$d/default.settings.php" "$d/settings.php"
+  cat >> "$d/settings.php" <<EOF
+
+/**
+ * Written by 'prm demo'. Same shape as examples/drupal/README.md.
+ */
+\$databases['default']['default'] = [
+  'driver' => 'mysql',
+  'host' => getenv('DB_HOST'),
+  'port' => getenv('DB_PORT'),
+  'database' => getenv('DB_NAME'),
+  'username' => getenv('DB_USER'),
+  'password' => trim(file_get_contents(getenv('DB_PASSWORD_FILE'))),
+  'prefix' => '',
+  'collation' => 'utf8mb4_general_ci',
+  'init_commands' => ['isolation_level' => 'SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED'],
+];
+\$settings['hash_salt'] = getenv('DRUPAL_HASH_SALT');
+\$settings['trusted_host_patterns'] = ['^${site//./\\.}\\.localhost\$'];
+\$settings['config_sync_directory'] = '../config/sync';
+// TLS is terminated at the shared Caddy edge.
+\$settings['reverse_proxy'] = TRUE;
+\$settings['reverse_proxy_addresses'] = [\$_SERVER['REMOTE_ADDR'] ?? ''];
+EOF
+
+  info "installing drupal"
+  ensure_db "$site"
+  dc "$site" run --rm -T -w /var/www/html tools vendor/bin/drush site:install standard -y \
+    --account-name=admin --account-pass="$DEMO_PASS" --site-name="$site" >&2
+
+  cmd_site "$site" up   # not --wait: compose exits 1 if any service disables its healthcheck (cron)
+  if docker compose -p prm-edge -f "$EDGE_DIR/compose.yaml" ps -q caddy 2>/dev/null | grep -q .; then
+    cmd_edge reload
+  else
+    info "the edge is not running; start it with: prm edge up"
+  fi
+
+  info "demo site ready: https://$domain/  (admin / $DEMO_PASS)"
+  info "the certificate is from caddy's internal CA, so curl needs -k"
+  info "remove it with: prm $site down -v && chmod -R u+w $dir && rm -rf $dir $EDGE_DIR/sites/$site.caddy"
+}
+
 cmd_ls() {
   [ -d "$SITES_DIR" ] || exit 0
   local d n
@@ -235,6 +301,7 @@ cmd_site() {
 case "${1:-}" in
   ""|-h|--help|help) sed -n '2,7p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//';;
   new)  shift; cmd_new "$@";;
+  demo) shift; cmd_demo "$@";;
   ls)   cmd_ls;;
   edge) shift; cmd_edge "$@";;
   *)    site="$1"; shift; cmd_site "$site" "$@";;

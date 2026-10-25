@@ -21,7 +21,7 @@ is never empty and `composer create-project` refuses to target it:
 bin/prm blog compose run --rm tools sh -c '
   composer create-project drupal/recommended-project /tmp/new --no-interaction
   cd /tmp/new && composer require drush/drush
-  cp -a /tmp/new/. /var/www/html/
+  cp -R /tmp/new/. /var/www/html/
 '
 ```
 
