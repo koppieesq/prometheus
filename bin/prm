@@ -215,11 +215,14 @@ EOF
 
 cmd_ls() {
   [ -d "$SITES_DIR" ] || exit 0
-  local d n
+  local d n host url
   for d in "$SITES_DIR"/*/; do
     [ -f "${d}site.env" ] || continue
     n="$(basename "$d")"
-    printf '%-20s %-10s %s\n' "$n" "$(envget "${d}site.env" APP_TYPE)" "$(grep -m1 -o '^[^ ,{]*' "$EDGE_DIR/sites/$n.caddy" 2>/dev/null || echo '-')"
+    # first hostname of the site's caddy snippet, as a URL terminals can click
+    host="$(grep -m1 -o '^[^ ,{]*' "$EDGE_DIR/sites/$n.caddy" 2>/dev/null)" || host=""
+    if [ -n "$host" ]; then url="https://$host/"; else url="-"; fi
+    printf '%-20s %-10s %s\n' "$n" "$(envget "${d}site.env" APP_TYPE)" "$url"
   done
 }
 
