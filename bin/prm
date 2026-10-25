@@ -122,7 +122,12 @@ cmd_new() {
   fi
   mkdir -p "$dir/app/$files"
   # php-fpm runs as www-data (uid 33): it must be able to write uploads.
-  if chown 33:33 "$dir/files" 2>/dev/null; then :; else chmod 0777 "$dir/files"; info "could not chown files/ to uid 33; made it world-writable instead (expected off Linux; on Linux re-run as root for 33:33)"; fi
+  if chown 33:33 "$dir/files" 2>/dev/null; then :; else
+    chmod 0777 "$dir/files"
+    info "could not chown files/ to uid 33; made it world-writable instead"
+    info "expected off Linux, where the docker VM shares files as you; on Linux tighten it with:"
+    info "  sudo chown -R 33:33 '$dir/files' && sudo chmod 755 '$dir/files'"
+  fi
 
   local list="${domains//,/, }"
   mkdir -p "$EDGE_DIR/sites"

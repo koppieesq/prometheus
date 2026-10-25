@@ -33,8 +33,11 @@ stat .../sites/<name>/secrets/db_password: permission denied
 daemon cannot stat it. `prm new` refuses to run as root off Linux for this reason.
 
 The same uid mapping is why `prm new` reports `could not chown files/ to uid 33; made it
-world-writable instead` here. That message is expected on macOS, not a problem — `0777` is what lets
-php-fpm (uid 33 in the container) write uploads.
+world-writable instead` here: only root can chown to another uid, and you are not root. The message
+is expected on macOS and nothing needs fixing. On Linux that `0777` is what lets php-fpm (uid 33 in
+the container) write uploads; on a Docker-VM host it is belt and braces, because the share does not
+enforce its own permission bits — the VM's virtiofs mount defers to the daemon on the host, which
+runs as you, so any container uid can already write anywhere in the share.
 
 If you already created a site with sudo, remove it and start over — there is nothing in it worth
 saving:
