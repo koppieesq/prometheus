@@ -72,6 +72,12 @@ cmd_new() {
   local dir="$SITES_DIR/$site"
   [ ! -e "$dir/site.env" ] || die "site '$site' already exists"
 
+  # On macOS/Windows the daemon lives in a VM that shares this directory as the invoking user,
+  # so a root-owned 0700 secrets/ would be unreadable by it (and chown 33:33 below would stick).
+  if [ "$(id -u)" = 0 ] && [ "$(uname -s)" != Linux ]; then
+    die "don't run 'prm new' as root on $(uname -s): the docker VM shares your files as your user, so a root-owned secrets/ is unreadable by the daemon. Re-run without sudo."
+  fi
+
   local docroot=public files=public/files profiles="" extra=""
   case "$type" in
     generic)  ;;
@@ -116,7 +122,7 @@ cmd_new() {
   fi
   mkdir -p "$dir/app/$files"
   # php-fpm runs as www-data (uid 33): it must be able to write uploads.
-  if chown 33:33 "$dir/files" 2>/dev/null; then :; else chmod 0777 "$dir/files"; info "could not chown files/ to uid 33; made it world-writable (run as root to fix)"; fi
+  if chown 33:33 "$dir/files" 2>/dev/null; then :; else chmod 0777 "$dir/files"; info "could not chown files/ to uid 33; made it world-writable instead (expected off Linux; on Linux re-run as root for 33:33)"; fi
 
   local list="${domains//,/, }"
   mkdir -p "$EDGE_DIR/sites"

@@ -52,6 +52,9 @@ curl https://hello.example.com/                            # expect: "db: ok", "
 
 Point DNS A/AAAA records at the VPS first, or Let's Encrypt will not issue certificates.
 
+No VPS handy? The whole stack also comes up on a Mac under colima or Docker Desktop:
+[docs/try-on-macos.md](docs/try-on-macos.md).
+
 ## Your own site
 
 ```sh
@@ -88,7 +91,7 @@ images/php/            php-fpm image (runtime) + tools image (composer, git)
 scripts/               VPS bootstrap, systemd backup timer
 examples/              hello (smoke test), drupal, headless-spa (Rail Baron shape)
 sites/                 per-site state: app/, files/, secrets/, backups/, site.env (gitignored)
-docs/                  architecture, sizing, operations, local dev
+docs/                  architecture, sizing, operations, local dev, trying it on macOS
 ```
 
 ## Security notes
