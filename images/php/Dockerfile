@@ -23,4 +23,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends git unzip default-mysql-client \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 COPY --from=composer:2 /usr/bin/composer /usr/local/bin/composer
+# COMPOSER_HOME is a named volume; a fresh volume inherits this directory's
+# ownership from the image, so www-data can actually write the cache.
+RUN mkdir -p /tmp/composer && chown www-data:www-data /tmp/composer
 USER www-data

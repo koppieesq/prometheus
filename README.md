@@ -69,8 +69,9 @@ curl -k https://demo1.localhost/
 everything else from it: the site is `<name>`, the domain is `<name>.localhost`, the type is
 `drupal`. It scaffolds `drupal/recommended-project` plus drush, generates a hash salt and a
 `settings.php` wired to the stack's database secret, runs `drush site:install`, starts the
-containers and reloads the edge. It finishes in about a minute and a half on a warm composer
-cache, and prints the URL and the admin login.
+containers and reloads the edge. It takes a minute or two — each site has its own composer
+cache volume, so a new demo always downloads Drupal afresh — and prints the URL and the admin
+login when it is done.
 
 The certificate comes from Caddy's internal CA, so `curl` needs `-k` and a browser will warn
 until you trust that CA ([docs/try-on-macos.md](docs/try-on-macos.md)).

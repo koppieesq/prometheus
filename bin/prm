@@ -158,12 +158,18 @@ cmd_demo() { # one command from nothing to a working Drupal site, for kicking th
 
   # create-project refuses a non-empty target and the uploads mount keeps
   # /var/www/html non-empty, so build in /tmp and copy the contents up.
-  info "scaffolding drupal (first run downloads a few hundred MB)"
-  dc "$site" run --rm -T tools sh -c '
+  info "scaffolding drupal (first run downloads a few hundred MB, later runs reuse the composer cache)"
+  # composer output is left unquieted on purpose: this is the slow step, and silence
+  # for a minute looks like a hang.
+  dc "$site" run --rm -T --build tools sh -c '
     set -e
-    composer create-project drupal/recommended-project /tmp/new --no-interaction -q
-    cd /tmp/new && composer require -q drush/drush
+    echo "==> composer create-project drupal/recommended-project" >&2
+    composer create-project drupal/recommended-project /tmp/new --no-interaction
+    echo "==> composer require drush/drush" >&2
+    cd /tmp/new && composer require --no-interaction drush/drush
+    echo "==> copying the project into the site directory (a few thousand files)" >&2
     cp -R /tmp/new/. /var/www/html/   # -R not -a: preserving times across the mount can fail
+    echo "==> scaffold complete" >&2
   '
 
   info "writing settings.php"
