@@ -3,6 +3,8 @@
 #   prm new <site> <domain[,domain...]> [--type generic|drupal|headless|spa] [--size small|medium|large] [--example hello]
 #   prm demo <name>                     throwaway Drupal site on <name>.localhost, installed and serving
 #   prm ls
+#   prm all <command> [args]            run a site command against every site
+#   prm update                          pull new base images, rebuild and restart every site
 #   prm edge up|down|reload|logs|ps
 #   prm <site> up|down|restart|ps|logs|deploy|backup|restore <file>|sh|exec|compose ...
 #   prm <site> composer|drush|npm|npx ...
@@ -38,6 +40,9 @@ envget() {
 site_env() { local e="$SITES_DIR/$1/site.env"; [ -f "$e" ] || die "unknown site '$1' (missing $e)"; echo "$e"; }
 
 dc() { # dc <site> <compose args...>
+  # Without this, buildkit stamps a provenance attestation on every build, so an
+  # unchanged rebuild still yields a new image id and compose recreates php+cron.
+  export BUILDX_NO_DEFAULT_ATTESTATIONS=1
   local site="$1"; shift
   local env; env="$(site_env "$site")"
   local files=(-f "$STACK")
@@ -219,6 +224,42 @@ EOF
   info "  chmod -R u+w $dir && rm -rf $dir $EDGE_DIR/sites/$site.caddy && prm edge reload"
 }
 
+site_names() { # every site with a site.env, one per line
+  local d
+  [ -d "$SITES_DIR" ] || return 0
+  for d in "$SITES_DIR"/*/; do
+    [ -f "${d}site.env" ] && basename "$d"
+  done
+}
+
+cmd_all() { # run one site command against every site, without stopping at the first failure
+  [ $# -gt 0 ] || die "usage: prm all <command> [args...]   (e.g. prm all up)"
+  local site rc=0 failed=""
+  for site in $(site_names); do
+    info "--- $site: $* ---"
+    if cmd_site "$site" "$@"; then :; else rc=1; failed="$failed $site"; fi
+  done
+  [ -n "$failed" ] && info "failed:$failed"
+  return $rc
+}
+
+cmd_update() { # pull new base images, rebuild, restart every site, then prove what is running
+  local site rc=0 failed="" running
+  for site in $(site_names); do
+    info "--- $site ---"
+    if dc "$site" build --pull && dc "$site" up -d --remove-orphans; then :; else
+      rc=1; failed="$failed $site"; continue
+    fi
+  done
+  [ -n "$failed" ] && info "failed:$failed"
+  info "--- versions now running ---"
+  for site in $(site_names); do
+    running="$(dc "$site" exec -T php php -r 'echo PHP_VERSION;' 2>/dev/null)" || running="(php not running)"
+    printf '%-20s php %s\n' "$site" "$running"
+  done
+  return $rc
+}
+
 cmd_ls() {
   [ -d "$SITES_DIR" ] || exit 0
   local d n host url
@@ -289,7 +330,9 @@ cmd_site() {
     up)      dc "$site" up -d --build "$@";;
     down)    dc "$site" down "$@";;
     restart) dc "$site" restart "$@";;
-    ps|logs|build|pull|config|top|stats) dc "$site" "$sub" "$@";;
+    ps|logs|build|config|top|stats) dc "$site" "$sub" "$@";;
+    # php/cron are built here, not published: asking a registry for prm/php fails
+    pull)    dc "$site" pull --ignore-buildable "$@";;
     exec)    dc "$site" exec "$@";;
     sh)      dc "$site" exec php bash;;
     compose) dc "$site" "$@";;
@@ -313,6 +356,8 @@ case "${1:-}" in
   ""|-h|--help|help) sed -n '2,7p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//';;
   new)  shift; cmd_new "$@";;
   demo) shift; cmd_demo "$@";;
+  all)  shift; cmd_all "$@";;
+  update) cmd_update;;
   ls)   cmd_ls;;
   edge) shift; cmd_edge "$@";;
   *)    site="$1"; shift; cmd_site "$site" "$@";;

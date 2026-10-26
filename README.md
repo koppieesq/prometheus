@@ -109,7 +109,10 @@ Sizes (`--size`): `small` / `medium` / `large`, see [docs/sizing.md](docs/sizing
 
 ```
 prm new <site> <domains> [--type T] [--size S] [--example E]
+prm demo <name>                     throwaway Drupal site on <name>.localhost
 prm ls
+prm all <command> [args]            run a site command against every site
+prm update                          pull, rebuild and restart every site; report PHP versions
 prm edge up|down|reload|logs|ps|restart
 prm <site> up|down|restart|ps|logs|stats|deploy|sh
 prm <site> backup | restore <db-file.sql.gz>
