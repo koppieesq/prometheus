@@ -3,6 +3,9 @@
 #   prm new <site> <domain[,domain...]> [--type generic|drupal|headless|spa] [--size small|medium|large] [--example hello]
 #   prm demo <name>                     throwaway Drupal site on <name>.localhost, installed and serving
 #   prm ls
+#   prm all <command> [args]            run a site command against every site
+#   prm update                          pull new base images, rebuild and restart every site
+#   prm migrate <site> <domains> --code <dir> --db <dump> [--files <dir>]   import an existing site
 #   prm edge up|down|reload|logs|ps
 #   prm <site> up|down|restart|ps|logs|deploy|backup|restore <file>|sh|exec|compose ...
 #   prm <site> composer|drush|npm|npx ...
@@ -38,6 +41,9 @@ envget() {
 site_env() { local e="$SITES_DIR/$1/site.env"; [ -f "$e" ] || die "unknown site '$1' (missing $e)"; echo "$e"; }
 
 dc() { # dc <site> <compose args...>
+  # Without this, buildkit stamps a provenance attestation on every build, so an
+  # unchanged rebuild still yields a new image id and compose recreates php+cron.
+  export BUILDX_NO_DEFAULT_ATTESTATIONS=1
   local site="$1"; shift
   local env; env="$(site_env "$site")"
   local files=(-f "$STACK")
@@ -147,6 +153,48 @@ EOF
   info "next: put your app in $dir/app, then: prm $site up && prm edge reload"
 }
 
+write_drupal_settings() { # <site dir> <domain[,domain...]> <written-by> [<settings dir under app/>]
+  local dir="$1" domains="$2" by="$3" sub="${4:-web/sites/default}"
+  local d="$dir/app/$sub" hosts="" h
+  [ -f "$d/default.settings.php" ] || die "no $d/default.settings.php - is this a drupal docroot?"
+  chmod u+w "$d" 2>/dev/null || true          # drupal hardens this dir to 0555
+  [ -f "$d/settings.php" ] && chmod u+w "$d/settings.php"
+  if [ -f "$d/settings.php" ]; then
+    # php takes the last assignment, so appending overrides the old host's
+    # database credentials, hash salt and trusted hosts, while keeping any
+    # other settings the site had. The original is kept alongside.
+    info "settings.php exists; appending the prm block (original kept as settings.php.pre-prm)"
+    cp "$d/settings.php" "$d/settings.php.pre-prm"
+  else
+    cp "$d/default.settings.php" "$d/settings.php"
+  fi
+  for h in ${domains//,/ }; do hosts="$hosts'^${h//./\\.}\$', "; done
+  mkdir -p "$dir/app/config/sync"
+  cat >> "$d/settings.php" <<EOF
+
+/**
+ * Written by '$by'. Same shape as examples/drupal/README.md.
+ */
+\$databases['default']['default'] = [
+  'driver' => 'mysql',
+  'host' => getenv('DB_HOST'),
+  'port' => getenv('DB_PORT'),
+  'database' => getenv('DB_NAME'),
+  'username' => getenv('DB_USER'),
+  'password' => trim(file_get_contents(getenv('DB_PASSWORD_FILE'))),
+  'prefix' => '',
+  'collation' => 'utf8mb4_general_ci',
+  'init_commands' => ['isolation_level' => 'SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED'],
+];
+\$settings['hash_salt'] = getenv('DRUPAL_HASH_SALT');
+\$settings['trusted_host_patterns'] = [${hosts%, }];
+\$settings['config_sync_directory'] = '../config/sync';
+// TLS is terminated at the shared Caddy edge.
+\$settings['reverse_proxy'] = TRUE;
+\$settings['reverse_proxy_addresses'] = [\$_SERVER['REMOTE_ADDR'] ?? ''];
+EOF
+}
+
 cmd_demo() { # one command from nothing to a working Drupal site, for kicking the tyres
   local site="${1:-}"
   [ -n "$site" ] || die "usage: prm demo <name>   (serves it on <name>.localhost)"
@@ -173,32 +221,7 @@ cmd_demo() { # one command from nothing to a working Drupal site, for kicking th
   '
 
   info "writing settings.php"
-  mkdir -p "$dir/app/config/sync"
-  local d="$dir/app/web/sites/default"
-  cp "$d/default.settings.php" "$d/settings.php"
-  cat >> "$d/settings.php" <<EOF
-
-/**
- * Written by 'prm demo'. Same shape as examples/drupal/README.md.
- */
-\$databases['default']['default'] = [
-  'driver' => 'mysql',
-  'host' => getenv('DB_HOST'),
-  'port' => getenv('DB_PORT'),
-  'database' => getenv('DB_NAME'),
-  'username' => getenv('DB_USER'),
-  'password' => trim(file_get_contents(getenv('DB_PASSWORD_FILE'))),
-  'prefix' => '',
-  'collation' => 'utf8mb4_general_ci',
-  'init_commands' => ['isolation_level' => 'SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED'],
-];
-\$settings['hash_salt'] = getenv('DRUPAL_HASH_SALT');
-\$settings['trusted_host_patterns'] = ['^${site//./\\.}\\.localhost\$'];
-\$settings['config_sync_directory'] = '../config/sync';
-// TLS is terminated at the shared Caddy edge.
-\$settings['reverse_proxy'] = TRUE;
-\$settings['reverse_proxy_addresses'] = [\$_SERVER['REMOTE_ADDR'] ?? ''];
-EOF
+  write_drupal_settings "$dir" "$domain" "prm demo"
 
   info "installing drupal"
   ensure_db "$site"
@@ -217,6 +240,110 @@ EOF
   info "remove it with:"
   info "  prm $site down -v && docker volume rm ${site}_composer_cache"
   info "  chmod -R u+w $dir && rm -rf $dir $EDGE_DIR/sites/$site.caddy && prm edge reload"
+}
+
+site_names() { # every site with a site.env, one per line
+  local d
+  [ -d "$SITES_DIR" ] || return 0
+  for d in "$SITES_DIR"/*/; do
+    [ -f "${d}site.env" ] && basename "$d"
+  done
+}
+
+cmd_all() { # run one site command against every site, without stopping at the first failure
+  [ $# -gt 0 ] || die "usage: prm all <command> [args...]   (e.g. prm all up)"
+  local site rc=0 failed=""
+  for site in $(site_names); do
+    info "--- $site: $* ---"
+    if cmd_site "$site" "$@"; then :; else rc=1; failed="$failed $site"; fi
+  done
+  [ -n "$failed" ] && info "failed:$failed"
+  return $rc
+}
+
+cmd_update() { # pull new base images, rebuild, restart every site, then prove what is running
+  local site rc=0 failed="" running
+  for site in $(site_names); do
+    info "--- $site ---"
+    if dc "$site" build --pull && dc "$site" up -d --remove-orphans; then :; else
+      rc=1; failed="$failed $site"; continue
+    fi
+  done
+  [ -n "$failed" ] && info "failed:$failed"
+  info "--- versions now running ---"
+  for site in $(site_names); do
+    running="$(dc "$site" exec -T php php -r 'echo PHP_VERSION;' 2>/dev/null)" || running="(php not running)"
+    printf '%-20s php %s\n' "$site" "$running"
+  done
+  return $rc
+}
+
+cmd_migrate() { # lift one site out of an existing (multi)site onto this host
+  local site="${1:-}" domains="${2:-}" code="" db="" files="" size=small
+  if [ -z "$site" ] || [ -z "$domains" ]; then
+    die "usage: prm migrate <site> <domain[,domain]> --code <dir> --db <dump.sql[.gz]> [--files <dir>] [--size S]"
+  fi
+  shift 2
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --code)  code="$2"; shift 2;;
+      --db)    db="$2"; shift 2;;
+      --files) files="$2"; shift 2;;
+      --size)  size="$2"; shift 2;;
+      *) die "unknown option $1";;
+    esac
+  done
+  [ -n "$code" ] || die "--code <dir> is required (the drupal codebase to copy in)"
+  [ -d "$code" ] || die "--code: no such directory: $code"
+  [ -n "$db" ]   || die "--db <dump.sql[.gz]> is required"
+  [ -f "$db" ]   || die "--db: no such file: $db"
+  [ -z "$files" ] || [ -d "$files" ] || die "--files: no such directory: $files"
+
+  # Where is the docroot? A multisite is usually the web/ layout, but older ones
+  # put the docroot at the repo root, which serves vendor/ over HTTP.
+  local docroot=web filespath=web/sites/default/files
+  if [ -f "$code/web/index.php" ]; then :
+  elif [ -f "$code/index.php" ]; then
+    docroot=. ; filespath=sites/default/files
+    info "WARNING: docroot is the project root (legacy drupal/drupal layout)."
+    info "  vendor/ and composer.json will be served over HTTP. Restructure to the"
+    info "  web/ layout (drupal/recommended-project) before this faces the internet."
+  else
+    die "--code: no index.php at $code/web/ or $code/ - is that a drupal codebase?"
+  fi
+
+  local dir="$SITES_DIR/$site"
+  cmd_new "$site" "$domains" --type drupal --size "$size"
+  if [ "$docroot" != web ]; then
+    sed -i.bak "s|^DOCROOT=.*|DOCROOT=$docroot|; s|^FILES_PATH=.*|FILES_PATH=$filespath|" "$dir/site.env"
+    rm -f "$dir/site.env.bak"
+  fi
+  printf 'DRUPAL_HASH_SALT=%s\n' "$(random_secret)" >> "$dir/site.env"
+
+  info "copying the codebase from $code"
+  cp -R "$code/." "$dir/app/"
+  chmod -R u+w "$dir/app"   # a live drupal tree arrives with 0555 dirs and 0444 settings
+
+  if [ -n "$files" ]; then
+    info "copying uploads from $files"
+    cp -R "$files/." "$dir/files/"
+    chmod -R u+w "$dir/files"
+  fi
+
+  info "writing settings.php"
+  write_drupal_settings "$dir" "$domains" "prm migrate" "$(dirname "$filespath")"
+
+  info "restoring the database"
+  ensure_db "$site"
+  PRM_YES=1 cmd_restore "$site" "$db"
+
+  cmd_site "$site" up --wait
+  cmd_edge reload
+
+  info "migrated '$site' -> https://${domains%%,*}/"
+  info "the database came from another host, so finish with:"
+  info "  prm $site deploy      # drush updatedb, config:import, cache rebuild"
+  info "left in place for you to review: any web/sites/<name>/ from the old multisite"
 }
 
 cmd_ls() {
@@ -275,8 +402,11 @@ cmd_restore() {
     read -r -p "This REPLACES the database of '$site' with $file. Type the site name to continue: " ans
     [ "$ans" = "$site" ] || die "aborted"
   fi
+  # a dump exported from a legacy host is as often plain .sql as gzipped.
+  # gunzip -c, not zcat: BSD zcat looks for "$file".Z and fails on macOS.
   # shellcheck disable=SC2016
-  gunzip -c "$file" | dc "$site" exec -T db sh -c 'MYSQL_PWD="$(cat /run/secrets/db_root_password)" exec mariadb -uroot "$MARIADB_DATABASE"'
+  { if gzip -t "$file" 2>/dev/null; then gunzip -c "$file"; else cat "$file"; fi; } \
+    | dc "$site" exec -T db sh -c 'MYSQL_PWD="$(cat /run/secrets/db_root_password)" exec mariadb -uroot "$MARIADB_DATABASE"'
   info "database restored from $file"
 }
 
@@ -289,7 +419,9 @@ cmd_site() {
     up)      dc "$site" up -d --build "$@";;
     down)    dc "$site" down "$@";;
     restart) dc "$site" restart "$@";;
-    ps|logs|build|pull|config|top|stats) dc "$site" "$sub" "$@";;
+    ps|logs|build|config|top|stats) dc "$site" "$sub" "$@";;
+    # php/cron are built here, not published: asking a registry for prm/php fails
+    pull)    dc "$site" pull --ignore-buildable "$@";;
     exec)    dc "$site" exec "$@";;
     sh)      dc "$site" exec php bash;;
     compose) dc "$site" "$@";;
@@ -310,9 +442,12 @@ cmd_site() {
 }
 
 case "${1:-}" in
-  ""|-h|--help|help) sed -n '2,7p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//';;
+  ""|-h|--help|help) awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "${BASH_SOURCE[0]}";;
   new)  shift; cmd_new "$@";;
   demo) shift; cmd_demo "$@";;
+  all)  shift; cmd_all "$@";;
+  migrate) shift; cmd_migrate "$@";;
+  update) cmd_update;;
   ls)   cmd_ls;;
   edge) shift; cmd_edge "$@";;
   *)    site="$1"; shift; cmd_site "$site" "$@";;
