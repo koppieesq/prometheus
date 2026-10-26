@@ -27,6 +27,50 @@ bin/prm blog composer install --no-dev
 bin/prm blog deploy        # runs DEPLOY_COMMAND (e.g. drush deploy), recreates containers, restarts php
 ```
 
+## Migrating an existing site in
+
+`prm migrate` lifts a site off another host into its own stack here:
+
+```sh
+bin/prm migrate blog blog.example.com \
+  --code /backup/blog/code \
+  --db   /backup/blog/db.sql.gz \
+  --files /backup/blog/files
+```
+
+It creates the site, copies the codebase, copies the uploads, writes a `settings.php` wired to this
+stack's database secret, restores the dump, starts everything and reloads the edge. `--db` takes
+either `.sql` or `.sql.gz`. `--files` is optional.
+
+Finish with `prm <site> deploy` — the database came from somewhere else, so it still needs
+`drush updatedb`, `config:import` and a cache rebuild.
+
+### Splitting a Drupal multisite
+
+Run it once per child site. Each becomes an ordinary, independent prm site: its own database,
+uploads, container set and backup schedule, and its own PHP version if you want one.
+
+```sh
+bin/prm migrate alpha alpha.example.com --code ./shared-codebase --db alpha.sql.gz --files sites/alpha/files
+bin/prm migrate beta  beta.example.com  --code ./shared-codebase --db beta.sql.gz  --files sites/beta/files
+```
+
+The same codebase is copied into each site, so each gets an independent copy to deploy and patch.
+`prm update` still patches PHP across all of them in one command.
+
+Two things to know:
+
+- **The old `settings.php` is overridden, not deleted.** A live codebase always ships one pointing at
+  the old host's database. prm appends its block after it — PHP takes the last assignment, so the
+  database credentials, hash salt and trusted hosts become this host's, while anything else the site
+  configured survives. The original is kept beside it as `settings.php.pre-prm`.
+- **`web/sites/<name>/` directories from the old multisite are left in place.** Each migrated site
+  serves from `sites/default`, so the others are inert, but they still contain the old settings
+  files. Review and delete them once the migration is confirmed.
+
+Cut DNS over only after the migrated site answers correctly on the VPS — test with a hosts-file
+entry first.
+
 ## Upgrades
 
 ### A PHP security patch (8.4.27 -> 8.4.28)
