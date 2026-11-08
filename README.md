@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.svg" alt="Prometheus logo: a floating android arm holding a lit wooden torch" width="200">
+</p>
+
 # Prometheus
 
 An opinionated, small, boring way to run **several PHP sites on one VPS** with Docker Compose:
@@ -318,7 +322,7 @@ images/php/            php-fpm image (runtime) + tools image (composer, git)
 scripts/               VPS bootstrap, systemd backup timer
 examples/              hello (smoke test), drupal, headless-spa (Rail Baron shape)
 sites/                 per-site state: app/, files/, secrets/, backups/, site.env (gitignored)
-docs/                  architecture, sizing, operations, local dev, trying it on macOS
+docs/                  architecture, sizing, operations, local dev, trying it on macOS; logo.svg
 ```
 
 ## Security notes
