@@ -5,7 +5,7 @@
 #   prm ls
 #   prm all <command> [args]            run a site command against every site
 #   prm update                          pull new base images, rebuild and restart every site
-#   prm migrate <site> <domains> --code <dir> --db <dump> [--files <dir>]   import an existing site
+#   prm migrate <site> <domains> --code <dir> --db <dump> [--files <dir>] [--from-site <dir>]   import an existing site
 #   prm edge up|down|reload|logs|ps
 #   prm <site> up|down|restart|ps|logs|deploy|backup|restore <file>|sh|exec|compose ...
 #   prm <site> composer|drush|npm|npx ...
@@ -279,9 +279,9 @@ cmd_update() { # pull new base images, rebuild, restart every site, then prove w
 }
 
 cmd_migrate() { # lift one site out of an existing (multi)site onto this host
-  local site="${1:-}" domains="${2:-}" code="" db="" files="" size=small
+  local site="${1:-}" domains="${2:-}" code="" db="" files="" size=small from=""
   if [ -z "$site" ] || [ -z "$domains" ]; then
-    die "usage: prm migrate <site> <domain[,domain]> --code <dir> --db <dump.sql[.gz]> [--files <dir>] [--size S]"
+    die "usage: prm migrate <site> <domain[,domain]> --code <dir> --db <dump.sql[.gz]> [--files <dir>] [--from-site <dir|name>] [--size S]"
   fi
   shift 2
   while [ $# -gt 0 ]; do
@@ -289,6 +289,7 @@ cmd_migrate() { # lift one site out of an existing (multi)site onto this host
       --code)  code="$2"; shift 2;;
       --db)    db="$2"; shift 2;;
       --files) files="$2"; shift 2;;
+      --from-site) from="$2"; shift 2;;
       --size)  size="$2"; shift 2;;
       *) die "unknown option $1";;
     esac
@@ -297,7 +298,6 @@ cmd_migrate() { # lift one site out of an existing (multi)site onto this host
   [ -d "$code" ] || die "--code: no such directory: $code"
   [ -n "$db" ]   || die "--db <dump.sql[.gz]> is required"
   [ -f "$db" ]   || die "--db: no such file: $db"
-  [ -z "$files" ] || [ -d "$files" ] || die "--files: no such directory: $files"
 
   # Where is the docroot? A multisite is usually the web/ layout, but older ones
   # put the docroot at the repo root, which serves vendor/ over HTTP.
@@ -312,6 +312,22 @@ cmd_migrate() { # lift one site out of an existing (multi)site onto this host
     die "--code: no index.php at $code/web/ or $code/ - is that a drupal codebase?"
   fi
 
+  # A multisite child: while sites/sites.php exists, drupal reads the child's
+  # sites/<name>/settings.php and never sites/default/, where prm writes its
+  # block. So the child is promoted to the default site in the copy.
+  local src="" name=""
+  if [ -n "$from" ]; then
+    if [ -d "$from" ]; then src="$from"
+    elif [ -d "$code/$docroot/sites/$from" ]; then src="$code/$docroot/sites/$from"
+    else die "--from-site: no such directory: $from (nor $code/$docroot/sites/$from)"
+    fi
+    src="$(cd "$src" && pwd)"; name="$(basename "$src")"
+    [ -f "$src/settings.php" ] || die "--from-site: no settings.php in $src - is that a drupal site directory?"
+    [ "$name" != default ] || die "--from-site: $src is already the default site; leave the option out"
+    [ -n "$files" ] || [ ! -d "$src/files" ] || files="$src/files"
+  fi
+  [ -z "$files" ] || [ -d "$files" ] || die "--files: no such directory: $files"
+
   local dir="$SITES_DIR/$site"
   cmd_new "$site" "$domains" --type drupal --size "$size"
   if [ "$docroot" != web ]; then
@@ -324,6 +340,22 @@ cmd_migrate() { # lift one site out of an existing (multi)site onto this host
   cp -R "$code/." "$dir/app/"
   chmod -R u+w "$dir/app"   # a live drupal tree arrives with 0555 dirs and 0444 settings
 
+  local sites="$dir/app/$docroot/sites" d
+  if [ -n "$src" ]; then
+    info "promoting sites/$name to the default site"
+    # settings.php, services.yml, settings.local.php...: everything the child's settings include
+    find "$src" -maxdepth 1 -type f -exec cp {} "$sites/default/" \;
+    if [ -f "$sites/sites.php" ]; then mv "$sites/sites.php" "$sites/sites.php.pre-prm"; fi
+    # every child's uploads came along with the codebase; this site's arrive
+    # via --files, and the rest would multiply disk use by the number of children
+    for d in "$sites"/*/; do
+      [ "$(basename "$d")" = default ] || rm -rf "${d}files"
+    done
+    # links stored in content still say /sites/<name>/files/...
+    mkdir -p "$sites/$name"
+    ln -s ../default/files "$sites/$name/files"
+  fi
+
   if [ -n "$files" ]; then
     info "copying uploads from $files"
     cp -R "$files/." "$dir/files/"
@@ -332,6 +364,13 @@ cmd_migrate() { # lift one site out of an existing (multi)site onto this host
 
   info "writing settings.php"
   write_drupal_settings "$dir" "$domains" "prm migrate" "$(dirname "$filespath")"
+  if [ -n "$src" ]; then
+    # the child's own settings may pin uploads to sites/<name>/files, outside the mount
+    echo "\$settings['file_public_path'] = 'sites/default/files';" >> "$sites/default/settings.php"
+    if grep -q "file_private_path" "$sites/default/settings.php"; then
+      info "WARNING: the site sets file_private_path; private files are not migrated, copy them by hand"
+    fi
+  fi
 
   info "restoring the database"
   ensure_db "$site"

@@ -47,13 +47,27 @@ Finish with `prm <site> deploy` — the database came from somewhere else, so it
 
 ### Splitting a Drupal multisite
 
-Run it once per child site. Each becomes an ordinary, independent prm site: its own database,
-uploads, container set and backup schedule, and its own PHP version if you want one.
+Run it once per child site, with `--from-site` naming the child. Each becomes an ordinary,
+independent prm site: its own database, uploads, container set and backup schedule, and its own PHP
+version if you want one.
 
 ```sh
-bin/prm migrate alpha alpha.example.com --code ./shared-codebase --db alpha.sql.gz --files sites/alpha/files
-bin/prm migrate beta  beta.example.com  --code ./shared-codebase --db beta.sql.gz  --files sites/beta/files
+bin/prm migrate alpha alpha.example.com --code /var/www/drupal --from-site alpha.example.com --db alpha.sql.gz
+bin/prm migrate beta  beta.example.com  --code /var/www/drupal --from-site beta.example.com  --db beta.sql.gz
 ```
+
+`--from-site` is the child's site directory: a path, or its name under `<docroot>/sites/`. It's
+required for a multisite. While `sites/sites.php` exists, Drupal routes each hostname to
+`sites/<name>/settings.php` and never reads `sites/default/settings.php`, where prm writes its block,
+so the site would keep the old host's database credentials. In the copy, `migrate` handles this:
+
+- the child's settings files are promoted into `sites/default/`, and `sites.php` is set aside as
+  `sites.php.pre-prm`
+- uploads come from `<site dir>/files` (override with `--files`), and `file_public_path` is pinned
+  to `sites/default/files`, where the stack mounts them
+- `sites/<child>/files` becomes a symlink to them, so `/sites/<child>/files/...` links stored in
+  content keep working
+- the other children's uploads are dropped from the copy
 
 The same codebase is copied into each site, so each gets an independent copy to deploy and patch.
 `prm update` still patches PHP across all of them in one command.
@@ -63,10 +77,10 @@ Two things to know:
 - **The old `settings.php` is overridden, not deleted.** A live codebase always ships one pointing at
   the old host's database. prm appends its block after it — PHP takes the last assignment, so the
   database credentials, hash salt and trusted hosts become this host's, while anything else the site
-  configured survives. The original is kept beside it as `settings.php.pre-prm`.
-- **`web/sites/<name>/` directories from the old multisite are left in place.** Each migrated site
-  serves from `sites/default`, so the others are inert, but they still contain the old settings
-  files. Review and delete them once the migration is confirmed.
+  configured survives. The original is kept beside it as `settings.php.pre-prm`. nginx refuses to
+  serve `*.pre-prm` files.
+- **The other children's `sites/<name>/` directories are left in place,** settings files included.
+  With `sites.php` gone they are inert. Review and delete them once the migration is confirmed.
 
 Cut DNS over only after the migrated site answers correctly on the VPS — test with a hosts-file
 entry first.

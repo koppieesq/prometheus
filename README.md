@@ -105,6 +105,106 @@ App types (`--type`): `generic` (front controller: Laravel, Symfony, plain PHP),
 (SPA at `/` + PHP API + websocket at `/ws`, single origin), `spa` (static only).
 Sizes (`--size`): `small` / `medium` / `large`, see [docs/sizing.md](docs/sizing.md).
 
+## Moving an existing Drupal multisite into Docker on the same VPS
+
+`prm migrate` imports one existing site into its own stack. Run it once per multisite child and each
+child becomes an ordinary prm site with its own database, uploads, containers and backups. The old
+setup keeps serving until the cutover at the end, and rolling back means starting the old web server
+again.
+
+The examples use a child `alpha` served at `alpha.example.com`, with its site directory at
+`web/sites/alpha.example.com` in a live codebase at `/var/www/drupal`. Repeat steps 2-4 for every child.
+
+### 1. Install Docker without breaking the host
+
+`scripts/bootstrap-vps.sh` is written for a **fresh** VPS. On a host that is already in service, read it
+first: it enables ufw with only SSH, 80 and 443 open, which would cut off anything else the box
+serves (mail, a non-22 SSH port, remote MySQL). Either run it with the correct `SSH_PORT`, knowing
+that, or install Docker yourself and run `docker network create edge`. Then:
+
+```sh
+cp edge/.env.example edge/.env && $EDITOR edge/.env      # ACME email
+```
+
+Don't run `prm edge up` yet. Your current web server owns ports 80/443.
+
+### 2. Dump the child's database
+
+```sh
+mkdir -p /root/prm-stage
+mysqldump --single-transaction --routines --triggers alpha_db | gzip > /root/prm-stage/alpha.sql.gz
+```
+
+### 3. Migrate
+
+```sh
+bin/prm migrate alpha alpha.example.com,www.alpha.example.com --size small \
+  --code      /var/www/drupal \
+  --from-site /var/www/drupal/web/sites/alpha.example.com \
+  --db        /root/prm-stage/alpha.sql.gz
+sudo chown -R 33:33 sites/alpha/files     # php-fpm (www-data) must own the uploads, not whoever ran cp
+bin/prm alpha deploy                      # updatedb, config:import, cache rebuild
+```
+
+`--code` is the multisite codebase on the host. It's only read: `migrate` works on its own copy.
+`--from-site` is the child's site directory on the host, given as a path or as its name under
+`<docroot>/sites/`. Drupal ignores `sites/default/settings.php` while `sites/sites.php` exists, so in
+the copy `migrate` does the following:
+
+- It promotes the child to the default site: the child's `settings.php`, `services.yml` and
+  any other files it includes are copied into `sites/default/`, and `sites.php` is set aside as
+  `sites.php.pre-prm`.
+- It takes uploads from `<site dir>/files` unless `--files` says otherwise, and pins
+  `file_public_path` to `sites/default/files`, where the stack mounts them.
+- It symlinks `sites/<child>/files` to `sites/default/files`, so links stored in content as
+  `/sites/alpha.example.com/files/...` keep working.
+- It drops the other children's uploads from the copy. They would otherwise be duplicated into
+  every site.
+
+Private files (`file_private_path`) aren't migrated. `migrate` warns if the site uses them.
+
+The last step of `migrate`, `edge reload`, fails because the edge isn't running yet. This is
+expected: the site is created and running at that point. Each child runs its own MariaDB and PHP-FPM,
+so pick `--size` with [docs/sizing.md](docs/sizing.md) and the VPS's total memory in mind.
+
+### 4. Test it before the cutover
+
+The site is already reachable on the docker network, so you can test it without touching ports 80/443:
+
+```sh
+docker run --rm --network edge curlimages/curl -sI -H 'Host: alpha.example.com' http://alpha-web/
+bin/prm alpha drush status
+```
+
+Expect a `200` and drush reporting a connected database.
+
+### 5. Cut over
+
+For each child, freeze content, then take a final dump and load it:
+
+```sh
+drush -r /var/www/drupal/web -l alpha.example.com state:set system.maintenance_mode 1   # old site
+mysqldump --single-transaction --routines --triggers alpha_db | gzip > /root/prm-stage/alpha-final.sql.gz
+bin/prm alpha restore /root/prm-stage/alpha-final.sql.gz && bin/prm alpha deploy
+bin/prm alpha drush state:set system.maintenance_mode 0                                  # new site
+```
+
+Then hand the ports to the edge. DNS already points at this VPS, so Caddy gets Let's Encrypt
+certificates on the first request:
+
+```sh
+sudo systemctl stop nginx && sudo systemctl disable nginx    # or apache2
+bin/prm edge up
+```
+
+To roll back: `bin/prm edge down && sudo systemctl enable --now nginx`.
+
+### 6. Clean up after the new setup is confirmed
+
+- Remove the old host's `drush cron` crontab entries. Each stack runs its own cron.
+- Stop the host's MySQL/MariaDB and PHP-FPM once nothing needs them.
+- Schedule backups: [docs/operations.md](docs/operations.md).
+
 ## Commands
 
 ```
@@ -113,7 +213,7 @@ prm demo <name>                     throwaway Drupal site on <name>.localhost
 prm ls
 prm all <command> [args]            run a site command against every site
 prm update                          pull, rebuild and restart every site; report PHP versions
-prm migrate <site> <domains> --code <dir> --db <dump> [--files <dir>]
+prm migrate <site> <domains> --code <dir> --db <dump> [--files <dir>] [--from-site <dir>] [--size S]
 prm edge up|down|reload|logs|ps|restart
 prm <site> up|down|restart|ps|logs|stats|deploy|sh
 prm <site> backup | restore <db-file.sql.gz>
