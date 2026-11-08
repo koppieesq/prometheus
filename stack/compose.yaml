@@ -192,7 +192,7 @@ services:
     working_dir: /var/www/html
     volumes:
       - ${SITE_DIR}/app:/var/www/html:rw
-      - npm_cache:/root/.npm
+      - npm_cache:/npm-cache
 
 secrets:
   db_password:

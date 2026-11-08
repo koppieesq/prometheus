@@ -130,20 +130,26 @@ mysqldump --single-transaction --routines --triggers alpha_db | gzip > /root/prm
 
 ### 3. Migrate
 
-Run `prm` with `sudo` on this server. A live Drupal tree normally belongs to `www-data` and its
-settings files are often readable only by that user. `migrate` checks this before it creates anything
-and says which file it couldn't read. Once you've used `sudo`, keep using it for every `prm` command
-here: the site's `secrets/` folder is then owned by root. The commands below leave it out for
-readability.
+Run `migrate` with `sudo`. A live Drupal tree normally belongs to `www-data` and its settings files
+are often readable only by that user. `migrate` checks this before it creates anything and says
+which file it couldn't read. Afterwards, hand the site to the user that deploys it (here `deploy`,
+a member of the `docker` group). From then on that user runs `prm` without `sudo`. The uploads stay
+with `www-data`, which php-fpm runs as:
 
 ```sh
-bin/prm migrate alpha alpha.example.com,www.alpha.example.com --size small \
+sudo bin/prm migrate alpha alpha.example.com,www.alpha.example.com --size small \
   --code      /var/www/drupal \
   --from-site /var/www/drupal/web/sites/alpha.example.com \
   --db        /root/prm-stage/alpha.sql.gz
-sudo chown -R 33:33 sites/alpha/files     # php-fpm (www-data) must own the uploads, not whoever ran cp
+sudo chown -R deploy: sites/alpha && sudo chown -R 33:33 sites/alpha/files
+bin/prm alpha composer install --no-dev   # only if vendor/ isn't in the codebase (a git clone)
 bin/prm alpha deploy                      # updatedb, config:import, cache rebuild
 ```
+
+`prm <site> composer` and `prm <site> npm` run as whoever owns `app/`, because they write into the
+code (`vendor/`, `node_modules/`, build output). `drush` and `deploy` run as `www-data`, because
+Drupal writes into the uploads. `prm rm` needs `sudo` here, because the uploads aren't the deploy
+user's.
 
 `--code` is the multisite codebase on the host. It's only read: `migrate` works on its own copy.
 `--from-site` is the child's site directory on the host, given as a path or as its name under
@@ -186,7 +192,24 @@ in a subdirectory such as `kands-d10/web` by itself. If there's more than one, c
 `PROJECT_DIR` in `site.env`. `composer`, `drush`, `deploy` and cron all run there.
 
 `migrate` ends by saying the edge isn't running yet. That's expected until the cutover. If a
-migration fails part-way, `prm rm alpha` deletes everything it created, and you can run it again.
+migration fails part-way, `sudo bin/prm rm alpha` deletes everything it created, and you can run it
+again.
+
+**A frontend on its own domain.** A decoupled frontend, such as a React app on `example.com` that
+reads from Drupal on `cms.example.com`, is a second site of type `spa`. Give it its own clone of the
+repository; a sparse checkout keeps only the frontend:
+
+```sh
+git clone --sparse git@github.com:you/monorepo.git sites/front/app   # before `prm new`
+git -C sites/front/app sparse-checkout set frontend
+bin/prm new front example.com --type spa
+sed -i 's|^SPA_ROOT=.*|SPA_ROOT=frontend/build|' sites/front/site.env     # the build output, under app/
+bin/prm front npm --prefix frontend ci && bin/prm front npm --prefix frontend run build
+bin/prm front up
+```
+
+Build-time settings, such as Create React App's `.env.production`, are baked in by `npm run build`.
+`NODE_VERSION` in `site.env` picks the Node image that builds it (default 24).
 
 Each child runs its own MariaDB and PHP-FPM,
 so pick `--size` with [docs/sizing.md](docs/sizing.md) and the VPS's total memory in mind.
@@ -202,9 +225,34 @@ bin/prm alpha drush status
 
 Expect a `200` and drush reporting a connected database.
 
-### 5. Cut over
+### 5. Cut over, one site at a time
 
-For each child, freeze content, then take a final dump and load it:
+The host's web server keeps ports 80/443 until the last site has moved, so sites can move one at a
+time. While that's the case, publish each migrated site's web container on a **loopback** port, which
+nothing outside the VPS can reach. Then point the host web server's vhost for that domain at it,
+keeping its existing certificate. Choose a free port per site:
+
+```yaml
+# sites/alpha/compose.override.yaml - transition only, deleted at the final switch
+services:
+  web:
+    ports: ["127.0.0.1:8081:80"]
+```
+
+```nginx
+# host nginx: replaces the old vhost's root/PHP handling for alpha.example.com
+location / {
+    proxy_pass http://127.0.0.1:8081;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+Apply it with `bin/prm alpha up && sudo nginx -t && sudo systemctl reload nginx`. Drupal trusts
+the forwarded protocol, so it still builds `https://` links. To roll a site back, restore its old vhost.
+
+To move a site's content, freeze it, then take a final dump and load it:
 
 ```sh
 drush -r /var/www/drupal/web -l alpha.example.com state:set system.maintenance_mode 1   # old site
@@ -213,21 +261,34 @@ bin/prm alpha restore /root/prm-stage/alpha-final.sql.gz && bin/prm alpha deploy
 bin/prm alpha drush state:set system.maintenance_mode 0                                  # new site
 ```
 
-Then hand the ports to the edge. DNS already points at this VPS, so Caddy gets Let's Encrypt
-certificates on the first request:
+**When the last site has moved,** hand the ports to the edge. First give anything else the host web
+server still fronts a home: another app or an API on a subdomain. Then remove the loopback ports and
+switch. DNS already points at this VPS, so Caddy gets Let's Encrypt certificates on the first request:
 
 ```sh
+rm sites/*/compose.override.yaml && bin/prm all up            # if the overrides held only the ports
 sudo systemctl stop nginx && sudo systemctl disable nginx    # or apache2
 bin/prm edge up
 ```
 
-To roll back: `bin/prm edge down && sudo systemctl enable --now nginx`.
+To roll back: `bin/prm edge down && sudo systemctl enable --now nginx`, with the overrides restored.
 
 ### 6. Clean up after the new setup is confirmed
 
 - Remove the old host's `drush cron` crontab entries. Each stack runs its own cron.
 - Stop the host's MySQL/MariaDB and PHP-FPM once nothing needs them.
 - Schedule backups: [docs/operations.md](docs/operations.md).
+
+**Deploying afterwards**, e.g. from CI over SSH as the deploy user:
+
+```sh
+cd /opt/prometheus
+git -C sites/alpha/app fetch origin main && git -C sites/alpha/app reset --hard origin/main
+bin/prm alpha composer install --no-dev --no-interaction
+bin/prm alpha deploy
+```
+
+`settings.prm.php` and the uploads aren't tracked, so `reset --hard` leaves them alone.
 
 ## Commands
 
@@ -243,7 +304,7 @@ prm migrate <site> <domains> --code <dir> --db <dump> [--files <dir>] [--from-si
 prm edge up|down|reload|logs|ps|restart
 prm <site> up|down|restart|ps|logs|stats|deploy|sh
 prm <site> backup | restore <db-file.sql.gz>
-prm <site> composer|drush|npm|npx ...
+prm <site> composer|drush|npm|npx ...  composer/npm run as app/'s owner, drush as www-data
 prm <site> exec <service> <cmd>     prm <site> compose <any docker compose args>
 ```
 
@@ -263,7 +324,8 @@ docs/                  architecture, sizing, operations, local dev, trying it on
 ## Security notes
 
 - Only Caddy publishes ports. `bootstrap-vps.sh` enables ufw, but **Docker bypasses ufw for published
-  ports**, so never add `ports:` to a site's services.
+  ports**, so never add `ports:` to a site's services. The one exception is a loopback-only port
+  (`127.0.0.1:...`) while the host's own web server still fronts a site during a migration.
 - DB passwords are generated per site into `sites/<name>/secrets/` and passed as Docker secrets, not env vars.
 - App code is mounted **read-only** into nginx and php-fpm; only the uploads dir is writable.
 - `PRM_HARDENED=1` drops all Linux capabilities except those each image needs (opt-in until CI has proven it).

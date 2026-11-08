@@ -48,6 +48,24 @@ envset() {
   fi
 }
 
+app_owner() { # uid:gid owning the site's app/ (GNU stat, else BSD)
+  local a; a="$(envget "$(site_env "$1")" SITE_DIR)/app"
+  stat -c '%u:%g' "$a" 2>/dev/null || stat -f '%u:%g' "$a"
+}
+
+# as_owner <site> <service> <cache dir in that service> <workdir> <command...>
+# composer and npm write into the code (vendor/, node_modules/, build/), so they
+# run as whoever owns app/ - a git checkout belongs to a person, not to
+# www-data, and on Linux www-data can't write there. Each uid gets its own
+# subdirectory of the shared cache volume.
+as_owner() {
+  local site="$1" svc="$2" cache="$3" wd="$4" owner uid; shift 4
+  owner="$(app_owner "$site")"; uid="${owner%%:*}"
+  dc "$site" run --rm -T --no-deps -u 0 "$svc" sh -c "mkdir -p '$cache/u$uid' && chown '$owner' '$cache/u$uid'" >/dev/null
+  dc "$site" run --rm --no-deps -u "$owner" -e HOME="$cache/u$uid" -e COMPOSER_HOME="$cache/u$uid" \
+    -e npm_config_cache="$cache/u$uid" -e COMPOSER_ALLOW_SUPERUSER=1 -w "$wd" "$svc" "$@"
+}
+
 project_dir() { # the site's composer project root inside the containers
   local p; p="$(envget "$(site_env "$1")" PROJECT_DIR .)"
   if [ "$p" = . ]; then echo /var/www/html; else echo "/var/www/html/$p"; fi
@@ -579,9 +597,9 @@ cmd_site() {
     exec)    dc "$site" exec "$@";;
     sh)      dc "$site" exec php bash;;
     compose) dc "$site" "$@";;
-    composer) dc "$site" run --rm -w "$(project_dir "$site")" tools composer "$@";;
+    composer) as_owner "$site" tools /tmp/composer "$(project_dir "$site")" composer "$@";;
     drush)   ensure_db "$site"; dc "$site" run --rm -w "${PRM_WORKDIR:-$(project_dir "$site")}" tools vendor/bin/drush "$@";;
-    npm|npx|node) dc "$site" run --rm node "$sub" "$@";;
+    npm|npx|node) as_owner "$site" node /npm-cache /var/www/html "$sub" "$@";;
     deploy)
       local cmd; cmd="$(envget "$(site_env "$site")" DEPLOY_COMMAND)"
       ensure_db "$site"
