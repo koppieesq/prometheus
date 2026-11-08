@@ -11,8 +11,8 @@ sites/rb/app/
 ```
 
 ```sh
+git clone <rail-baron repo> sites/rb/app          # before `prm new`: git refuses a non-empty dir
 bin/prm new rb rb.example.com --type headless
-git clone <rail-baron repo> sites/rb/app
 bin/prm rb composer install --no-dev --working-dir=backend
 bin/prm rb npm --prefix frontend ci
 bin/prm rb npm --prefix frontend run build

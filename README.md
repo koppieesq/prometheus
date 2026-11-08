@@ -77,14 +77,7 @@ The certificate comes from Caddy's internal CA, so `curl` needs `-k` and a brows
 until you trust that CA ([docs/try-on-macos.md](docs/try-on-macos.md)).
 
 The admin password is `admin`; override it with `PRM_DEMO_PASS`. Never point this at a real
-domain. To remove the site:
-
-```shell
-bin/prm demo1 down -v
-chmod -R u+w sites/demo1 && rm -rf sites/demo1 edge/sites/demo1.caddy
-```
-
-The `chmod` is needed because Drupal hardens `web/sites/default` to `0555` during install.
+domain. To remove the site, run `bin/prm rm demo1`.
 
 For a site you intend to keep, see [examples/drupal/README.md](examples/drupal/README.md) and
 "Your own site" below: the same steps, but with your own repository in `sites/<name>/app`.
@@ -92,10 +85,10 @@ For a site you intend to keep, see [examples/drupal/README.md](examples/drupal/R
 ## Your own site
 
 ```sh
+git clone git@github.com:you/blog.git sites/blog/app   # first: git refuses a non-empty directory
 bin/prm new blog blog.example.com --type drupal --size small
-# put your code in sites/blog/app   (git clone, rsync, CI deploy...)
 bin/prm blog composer install --no-dev
-# first run only: wire settings.php (see examples/drupal/README.md), then install or restore
+# first run only: write settings.prm.php (see examples/drupal/README.md), then install or restore
 bin/prm blog drush site:install           # ...or: bin/prm blog restore db-*.sql.gz
 bin/prm blog deploy                       # every deploy after that: db up -> DEPLOY_COMMAND -> up -> restart php
 bin/prm edge reload
@@ -137,6 +130,12 @@ mysqldump --single-transaction --routines --triggers alpha_db | gzip > /root/prm
 
 ### 3. Migrate
 
+Run `prm` with `sudo` on this server. A live Drupal tree normally belongs to `www-data` and its
+settings files are often readable only by that user. `migrate` checks this before it creates anything
+and says which file it couldn't read. Once you've used `sudo`, keep using it for every `prm` command
+here: the site's `secrets/` folder is then owned by root. The commands below leave it out for
+readability.
+
 ```sh
 bin/prm migrate alpha alpha.example.com,www.alpha.example.com --size small \
   --code      /var/www/drupal \
@@ -163,8 +162,33 @@ the copy `migrate` does the following:
 
 Private files (`file_private_path`) aren't migrated. `migrate` warns if the site uses them.
 
-The last step of `migrate`, `edge reload`, fails because the edge isn't running yet. This is
-expected: the site is created and running at that point. Each child runs its own MariaDB and PHP-FPM,
+**Where `migrate` writes its settings.** The hosting settings (database, hash salt, trusted hosts) go
+into `sites/default/settings.prm.php`. Each host gets its own copy, which is never committed.
+`settings.php` only needs this at its end, so these settings win:
+
+```php
+if (file_exists($app_root . '/' . $site_path . '/settings.prm.php')) {
+  include $app_root . '/' . $site_path . '/settings.prm.php';
+}
+```
+
+If that include isn't there, `migrate` appends it and keeps the original as `settings.php.pre-prm`.
+Commit the include to the site's repository, and later `git pull`s in `sites/<name>/app` stay
+clean. When the copy is a git checkout, `migrate` adds `settings.prm.php` and `*.pre-prm` to
+`.git/info/exclude`. A config sync directory the site sets itself is kept.
+
+**A codebase in its own repository, or a monorepo.** Clone it anywhere and pass the clone as
+`--code`. The copy includes `.git`, so `sites/<name>/app` becomes a working clone, and later deploys
+are `git pull` + `prm <name> deploy`. `vendor/` usually isn't in git, so run
+`bin/prm <name> composer install --no-dev` before `deploy`. In a monorepo, `migrate` finds Drupal
+in a subdirectory such as `kands-d10/web` by itself. If there's more than one, choose with
+`--docroot`. It records the Composer project root (the nearest `composer.json` above the docroot) as
+`PROJECT_DIR` in `site.env`. `composer`, `drush`, `deploy` and cron all run there.
+
+`migrate` ends by saying the edge isn't running yet. That's expected until the cutover. If a
+migration fails part-way, `prm rm alpha` deletes everything it created, and you can run it again.
+
+Each child runs its own MariaDB and PHP-FPM,
 so pick `--size` with [docs/sizing.md](docs/sizing.md) and the VPS's total memory in mind.
 
 ### 4. Test it before the cutover
@@ -211,9 +235,11 @@ To roll back: `bin/prm edge down && sudo systemctl enable --now nginx`.
 prm new <site> <domains> [--type T] [--size S] [--example E]
 prm demo <name>                     throwaway Drupal site on <name>.localhost
 prm ls
+prm rm <site>                       delete a site: containers, volumes, files, edge route
 prm all <command> [args]            run a site command against every site
 prm update                          pull, rebuild and restart every site; report PHP versions
-prm migrate <site> <domains> --code <dir> --db <dump> [--files <dir>] [--from-site <dir>] [--size S]
+prm migrate <site> <domains> --code <dir> --db <dump> [--files <dir>] [--from-site <dir>]
+            [--docroot <path>] [--size S]
 prm edge up|down|reload|logs|ps|restart
 prm <site> up|down|restart|ps|logs|stats|deploy|sh
 prm <site> backup | restore <db-file.sql.gz>

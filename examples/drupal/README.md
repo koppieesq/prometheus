@@ -1,16 +1,16 @@
 # Drupal 11
 
 ```sh
-bin/prm new blog blog.example.com --type drupal
 git clone git@github.com:you/blog.git sites/blog/app     # repo root contains composer.json and web/
+bin/prm new blog blog.example.com --type drupal          # after the clone: git refuses a non-empty dir
 bin/prm blog composer install --no-dev
 bin/prm blog up
 bin/prm edge reload
 ```
 
 `deploy` (`drush deploy` = updatedb, config:import, cache:rebuild) only maintains a site that
-already exists. A brand-new one needs `bin/prm blog drush site:install` once, after settings.php is
-wired; an existing one needs its database restored (`bin/prm blog restore db-*.sql.gz`). Running
+already exists. A brand-new one needs `bin/prm blog drush site:install` once, after `settings.prm.php`
+is written (below); an existing one needs its database restored (`bin/prm blog restore db-*.sql.gz`). Running
 `deploy` first on an empty database fails at bootstrap.
 
 Starting from nothing rather than from a git clone needs a detour. `prm new` pre-creates
@@ -29,9 +29,11 @@ bin/prm blog compose run --rm tools sh -c '
 `create-project` — `composer require`-ing it installs a template into `vendor/` and gives you no
 docroot.
 
-Then in `web/sites/default/settings.php` (or a `settings.prm.php` include):
+Then write the hosting settings into `web/sites/default/settings.prm.php`. It isn't committed:
+each host has its own. `prm migrate` writes this file for you.
 
 ```php
+<?php
 $databases['default']['default'] = [
   'driver' => 'mysql',
   'host' => getenv('DB_HOST'), 'port' => getenv('DB_PORT'),
@@ -46,6 +48,19 @@ $settings['reverse_proxy'] = TRUE;
 $settings['reverse_proxy_addresses'] = [$_SERVER['REMOTE_ADDR']];
 $settings['file_private_path'] = '/var/www/html/private'; // add a mount if you use private files
 ```
+
+Include it at the end of `settings.php` and commit that part. It's harmless where the file is absent
+(DDEV, CI):
+
+```php
+if (file_exists($app_root . '/' . $site_path . '/settings.prm.php')) {
+  include $app_root . '/' . $site_path . '/settings.prm.php';
+}
+```
+
+If Drupal sits in a subdirectory of the repository (a monorepo, e.g. `cms/web`), set `DOCROOT`,
+`FILES_PATH`, `PROJECT_DIR` (the directory holding `composer.json`) and `CRON_WORKDIR` in `site.env`.
+`prm migrate` does that for you.
 
 `DRUPAL_HASH_SALT` goes in `sites/<name>/site.env`. Only the keys named in `stack/compose.yaml`'s
 `x-php-env` block reach the container — `site.env` is compose's `--env-file`, which supplies

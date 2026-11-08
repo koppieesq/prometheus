@@ -38,9 +38,14 @@ bin/prm migrate blog blog.example.com \
   --files /backup/blog/files
 ```
 
-It creates the site, copies the codebase, copies the uploads, writes a `settings.php` wired to this
-stack's database secret, restores the dump, starts everything and reloads the edge. `--db` takes
-either `.sql` or `.sql.gz`. `--files` is optional.
+It creates the site and copies the codebase and uploads. It writes a `settings.prm.php` wired to
+this stack's database secret, and makes sure `settings.php` includes it. Then it restores the dump,
+starts everything and reloads the edge if it's running. `--db` takes either `.sql` or `.sql.gz`.
+`--files` is optional.
+
+`--code` can be a git clone, including a monorepo with Drupal in a subdirectory. `migrate` finds the
+docroot (or takes `--docroot <path>`) and records the Composer project root as `PROJECT_DIR`. See
+"Moving an existing Drupal multisite" in the README.
 
 Finish with `prm <site> deploy` — the database came from somewhere else, so it still needs
 `drush updatedb`, `config:import` and a cache rebuild.
@@ -75,10 +80,12 @@ The same codebase is copied into each site, so each gets an independent copy to 
 Two things to know:
 
 - **The old `settings.php` is overridden, not deleted.** A live codebase always ships one pointing at
-  the old host's database. prm appends its block after it — PHP takes the last assignment, so the
-  database credentials, hash salt and trusted hosts become this host's, while anything else the site
-  configured survives. The original is kept beside it as `settings.php.pre-prm`. nginx refuses to
-  serve `*.pre-prm` files.
+  the old host's database. prm writes its settings to `settings.prm.php` and includes it at the end
+  of `settings.php`. PHP takes the last assignment, so the database credentials, hash salt and
+  trusted hosts become this host's, while anything else the site configured survives. If
+  `settings.php` lacked the include, prm appends it and keeps the original as
+  `settings.php.pre-prm`; commit the include to the repository instead. nginx refuses to serve
+  `*.pre-prm` files.
 - **The other children's `sites/<name>/` directories are left in place,** settings files included.
   With `sites.php` gone they are inert. Review and delete them once the migration is confirmed.
 
@@ -90,7 +97,12 @@ entry first.
 ### A PHP security patch (8.4.27 -> 8.4.28)
 
 This is the common case, and it needs **no change to any site.env**: the patch ships inside the same
-`php:8.4-fpm-bookworm` tag the image already builds from.
+`php:8.4-fpm-trixie` tag the image already builds from.
+
+The `-trixie` suffix pins the operating system under PHP to Debian 13 ("trixie"). The bare `8.4-fpm` tag
+follows whatever Debian is current, so a new Debian release would change system libraries (OpenSSL,
+ICU, libxml) and package names under you. With the pin, moving to the next Debian release is a
+deliberate one-line change to `images/php/Dockerfile`, followed by `prm update`.
 
 ```sh
 bin/prm update        # every site: pull new base images, rebuild, recreate, then report versions
