@@ -98,6 +98,9 @@ bin/prm blog deploy                       # every deploy after that: db up -> DE
 bin/prm edge reload
 ```
 
+In a monorepo, `--dir <subdirectory>` says where in the clone the app lives: `--type drupal --dir cms`
+serves `cms/web` and runs `composer`, `drush` and cron in `cms/`.
+
 App types (`--type`): `generic` (front controller: Laravel, Symfony, plain PHP), `drupal`, `headless`
 (SPA at `/` + PHP API + websocket at `/ws`, single origin), `spa` (static only).
 Sizes (`--size`): `small` / `medium` / `large`, see [docs/sizing.md](docs/sizing.md).
@@ -201,16 +204,17 @@ again.
 
 **A frontend on its own domain.** A decoupled frontend, such as a React app on `example.com` that
 reads from Drupal on `cms.example.com`, is a second site of type `spa`. Give it its own clone of the
-repository; a sparse checkout keeps only the frontend:
+repository, and point `--dir` at the frontend's subdirectory:
 
 ```sh
-git clone --sparse git@github.com:you/monorepo.git sites/front/app   # before `prm new`
-git -C sites/front/app sparse-checkout set frontend
-bin/prm new front example.com --type spa
-sed -i 's|^SPA_ROOT=.*|SPA_ROOT=frontend/build|' sites/front/site.env     # the build output, under app/
-bin/prm front npm --prefix frontend ci && bin/prm front npm --prefix frontend run build
+git clone git@github.com:you/monorepo.git sites/front/app        # before `prm new`
+bin/prm new front example.com --type spa --dir frontend --spa-root build
+bin/prm front npm ci && bin/prm front npm run build              # npm runs in frontend/
 bin/prm front up
 ```
+
+`--dir` records the subdirectory as `PROJECT_DIR`, where `npm` (and `composer`) run. `--spa-root` is
+the build output inside it: `build` for Create React App, `dist` (the default) for Vite.
 
 Build-time settings, such as Create React App's `.env.production`, are baked in by `npm run build`.
 `NODE_VERSION` in `site.env` picks the Node image that builds it (default 24).
@@ -244,7 +248,8 @@ services:
 ```
 
 ```nginx
-# host nginx: replaces the old vhost's root/PHP handling for alpha.example.com
+# host nginx, in alpha.example.com's 443 server block, replacing its root/PHP handling
+client_max_body_size 32M;          # nginx defaults to 1M; the site allows PHP_UPLOAD_MAX (32M)
 location / {
     proxy_pass http://127.0.0.1:8081;
     proxy_set_header Host $host;
@@ -254,14 +259,20 @@ location / {
 ```
 
 Apply it with `bin/prm alpha up && sudo nginx -t && sudo systemctl reload nginx`. Drupal trusts
-the forwarded protocol, so it still builds `https://` links. To roll a site back, restore its old vhost.
+the forwarded protocol, so it still builds `https://` links. To roll a site back, restore its old
+vhost; keep the backup outside `sites-enabled`, which nginx loads in full. Then run
+`sudo certbot renew --dry-run`. A certificate renewed with `authenticator = webroot` still needs its
+`/.well-known/acme-challenge/` location served from that webroot.
 
-To move a site's content, freeze it, then take a final dump and load it:
+To move a site's content, freeze it, then load a final dump and copy the uploads again. Anything
+uploaded since the migration would otherwise be lost:
 
 ```sh
 drush -r /var/www/drupal/web -l alpha.example.com state:set system.maintenance_mode 1   # old site
 mysqldump --single-transaction --routines --triggers alpha_db | gzip > /root/prm-stage/alpha-final.sql.gz
-bin/prm alpha restore /root/prm-stage/alpha-final.sql.gz && bin/prm alpha deploy
+bin/prm alpha restore /root/prm-stage/alpha-final.sql.gz
+sudo rsync -a /var/www/drupal/web/sites/alpha.example.com/files/ sites/alpha/files/
+sudo chown -R 33:33 sites/alpha/files && bin/prm alpha deploy
 bin/prm alpha drush state:set system.maintenance_mode 0                                  # new site
 ```
 
@@ -297,7 +308,7 @@ bin/prm alpha deploy
 ## Commands
 
 ```
-prm new <site> <domains> [--type T] [--size S] [--example E]
+prm new <site> <domains> [--type T] [--size S] [--example E] [--dir D] [--spa-root R]
 prm demo <name>                     throwaway Drupal site on <name>.localhost
 prm ls
 prm rm <site>                       delete a site: containers, volumes, files, edge route

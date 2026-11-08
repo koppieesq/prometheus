@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # prm - run several small LEMP sites on one VPS.
 #   prm new <site> <domain[,domain...]> [--type generic|drupal|headless|spa] [--size small|medium|large] [--example hello]
+#           [--dir <subdir of app/>] [--spa-root <build dir, under --dir>]
 #   prm demo <name>                     throwaway Drupal site on <name>.localhost, installed and serving
 #   prm ls
 #   prm rm <site>                       delete a site: containers, volumes, files, edge route
@@ -66,7 +67,7 @@ as_owner() {
     -e npm_config_cache="$cache/u$uid" -e COMPOSER_ALLOW_SUPERUSER=1 -w "$wd" "$svc" "$@"
 }
 
-project_dir() { # the site's composer project root inside the containers
+project_dir() { # the site's project root inside the containers: composer, npm, drush and deploy run here
   local p; p="$(envget "$(site_env "$1")" PROJECT_DIR .)"
   if [ "$p" = . ]; then echo /var/www/html; else echo "/var/www/html/$p"; fi
 }
@@ -115,18 +116,24 @@ random_secret() { openssl rand -base64 33 2>/dev/null | tr -d '\n=+/' | cut -c1-
 
 cmd_new() {
   local site="${1:-}" domains="${2:-}"
-  if [ -z "$site" ] || [ -z "$domains" ]; then die "usage: prm new <site> <domain[,domain]> [--type T] [--size S] [--example E]"; fi
+  if [ -z "$site" ] || [ -z "$domains" ]; then die "usage: prm new <site> <domain[,domain]> [--type T] [--size S] [--example E] [--dir D] [--spa-root R]"; fi
   shift 2
   [[ "$site" =~ ^[a-z][a-z0-9-]{1,30}$ ]] || die "site name must match ^[a-z][a-z0-9-]{1,30}$"
-  local type=generic size=small example=""
+  local type=generic size=small example="" sub="" spa_root=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --type) type="$2"; shift 2;;
       --size) size="$2"; shift 2;;
       --example) example="$2"; shift 2;;
+      --dir) sub="${2%/}"; shift 2;;            # the app lives in this subdirectory of app/ (a monorepo)
+      --spa-root) spa_root="${2%/}"; shift 2;;  # the frontend build output, relative to --dir
       *) die "unknown option $1";;
     esac
   done
+  [ "$sub" != . ] || sub=""
+  case "$sub" in /*|..|../*|*/..|*/../*) die "--dir must be a path inside app/, like kands-react";; esac
+  if [ -n "$sub" ] && [ "$type" = headless ]; then die "--dir isn't supported for --type headless"; fi
+  if [ -n "$spa_root" ] && [ "$type" != spa ]; then die "--spa-root is for --type spa"; fi
   local dir="$SITES_DIR/$site" w
   [ ! -e "$dir/site.env" ] || die "site '$site' already exists (remove it with: prm rm $site)"
   # checked first: failing on edge/sites at the end would leave a half-made site
@@ -147,9 +154,15 @@ cmd_new() {
               extra=$'CRON_COMMAND=vendor/bin/drush cron\nCRON_INTERVAL=900\nDEPLOY_COMMAND=vendor/bin/drush deploy';;
     headless) docroot=backend/web; files=backend/web/sites/default/files; profiles="cache,cron,ws"
               extra=$'SPA_ROOT=frontend/dist\nCRON_COMMAND=vendor/bin/drush cron\nCRON_WORKDIR=/var/www/html/backend\nDEPLOY_COMMAND=cd backend && vendor/bin/drush deploy\nWS_DIR=ws-server';;
-    spa)      files=files; extra="SPA_ROOT=dist";;
+    spa)      files=files; extra="SPA_ROOT=${spa_root:-dist}";;
     *) die "unknown --type '$type' (generic|drupal|headless|spa)";;
   esac
+  if [ -n "$sub" ]; then   # everything the type knows about lives under the subdirectory
+    docroot="$sub/$docroot"; files="$sub/$files"
+    [ "$type" != spa ] || extra="SPA_ROOT=$sub/${spa_root:-dist}"
+    extra="${extra:+$extra$'\n'}PROJECT_DIR=$sub"
+    [ "$type" != drupal ] || extra="$extra"$'\n'"CRON_WORKDIR=/var/www/html/$sub"
+  fi
   local sizing
   case "$size" in
     small)  sizing=$'DB_BUFFER_POOL=128M\nDB_MEM_LIMIT=384m\nPHP_FPM_MAX_CHILDREN=6\nPHP_MEM_LIMIT=640m';;
@@ -200,7 +213,11 @@ $list {
 }
 EOF
   info "site '$site' created in $dir"
-  info "next: put your app in $dir/app, then: prm $site up && prm edge reload"
+  if [ -n "$(ls -A "$dir/app" 2>/dev/null | grep -v "^${files%%/*}$")" ]; then
+    info "next: prm $site up && prm edge reload"
+  else
+    info "next: put your app in $dir/app, then: prm $site up && prm edge reload"
+  fi
 }
 
 write_drupal_settings() { # <site dir> <domain[,domain...]> <written-by> [<settings dir under app/>]
@@ -599,7 +616,7 @@ cmd_site() {
     compose) dc "$site" "$@";;
     composer) as_owner "$site" tools /tmp/composer "$(project_dir "$site")" composer "$@";;
     drush)   ensure_db "$site"; dc "$site" run --rm -w "${PRM_WORKDIR:-$(project_dir "$site")}" tools vendor/bin/drush "$@";;
-    npm|npx|node) as_owner "$site" node /npm-cache /var/www/html "$sub" "$@";;
+    npm|npx|node) as_owner "$site" node /npm-cache "$(project_dir "$site")" "$sub" "$@";;
     deploy)
       local cmd; cmd="$(envget "$(site_env "$site")" DEPLOY_COMMAND)"
       ensure_db "$site"

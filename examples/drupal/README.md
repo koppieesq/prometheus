@@ -58,9 +58,9 @@ if (file_exists($app_root . '/' . $site_path . '/settings.prm.php')) {
 }
 ```
 
-If Drupal sits in a subdirectory of the repository (a monorepo, e.g. `cms/web`), set `DOCROOT`,
-`FILES_PATH`, `PROJECT_DIR` (the directory holding `composer.json`) and `CRON_WORKDIR` in `site.env`.
-`prm migrate` does that for you.
+If Drupal sits in a subdirectory of the repository (a monorepo, e.g. `cms/web`), create the site
+with `prm new ... --dir cms`. That sets `DOCROOT`, `FILES_PATH`, `PROJECT_DIR` (the directory holding
+`composer.json`) and `CRON_WORKDIR` in `site.env`. `prm migrate` finds the subdirectory by itself.
 
 `DRUPAL_HASH_SALT` goes in `sites/<name>/site.env`. Only the keys named in `stack/compose.yaml`'s
 `x-php-env` block reach the container — `site.env` is compose's `--env-file`, which supplies
