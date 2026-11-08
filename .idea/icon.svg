@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-labelledby="title">
+  <title id="title">Prometheus: a floating android arm holding a lit wooden torch</title>
+  <g stroke="#2b2b2b" stroke-linejoin="round" stroke-linecap="round">
+    <!-- badge -->
+    <circle cx="256" cy="256" r="246" fill="#fdf1dc" stroke-width="8"/>
+
+    <!-- hover shadow: the arm floats, nothing holds it up -->
+    <ellipse cx="190" cy="472" rx="86" ry="9" fill="#2b2b2b" fill-opacity="0.14" stroke="none"/>
+
+    <!-- torch -->
+    <g transform="rotate(12 256 350)">
+      <!-- flames -->
+      <path d="M256 34 C300 88 332 120 324 170 C318 210 290 234 256 234 C222 234 192 210 188 170 C184 134 208 116 220 88 C226 118 236 128 246 132 C240 100 244 62 256 34 Z" fill="#e94e1b" stroke-width="6"/>
+      <path d="M258 90 C288 128 304 150 300 182 C296 210 278 228 256 228 C234 228 216 212 214 186 C212 160 230 146 238 124 C244 146 250 150 254 152 C250 130 250 110 258 90 Z" fill="#f99a1c" stroke="none"/>
+      <path d="M257 140 C276 165 286 182 282 202 C278 218 268 226 256 226 C244 226 232 216 232 200 C232 184 244 174 250 160 C252 172 254 176 257 178 C255 166 254 152 257 140 Z" fill="#ffe14d" stroke="none"/>
+      <!-- pitch-soaked head and wrapping -->
+      <ellipse cx="256" cy="230" rx="31" ry="9" fill="#3d2b1f" stroke-width="5"/>
+      <rect x="225" y="230" width="62" height="40" rx="6" fill="#7b5232" stroke-width="6"/>
+      <path d="M230 242 L282 250 M230 256 L282 264" fill="none" stroke="#4e321c" stroke-width="4"/>
+      <!-- wooden handle -->
+      <path d="M237 270 L275 270 L267 462 Q256 476 245 462 Z" fill="#c68642" stroke-width="6"/>
+      <path d="M250 288 Q254 336 249 384 M262 300 Q258 356 262 440" fill="none" stroke="#8a5a2b" stroke-width="4"/>
+    </g>
+
+    <!-- sparks -->
+    <circle cx="380" cy="104" r="6" fill="#f99a1c" stroke-width="4"/>
+    <circle cx="396" cy="158" r="4" fill="#ffe14d" stroke-width="3"/>
+    <circle cx="188" cy="118" r="5" fill="#e94e1b" stroke-width="4"/>
+
+    <!-- android forearm, cut off below the elbow -->
+    <path d="M84 424 L215 352 L237 390 L116 476 Z" fill="#e9eef3" stroke-width="6"/>
+    <path d="M100 450 L118 438 M150 418 L224 372" fill="none" stroke="#b8c3cd" stroke-width="4"/>
+    <line x1="96" y1="438" x2="206" y2="372" stroke="#4fc3f7" stroke-width="6"/>
+    <!-- the cut end: a glowing joint socket -->
+    <ellipse cx="100" cy="450" rx="31" ry="12" transform="rotate(58 100 450)" fill="#3a4652" stroke-width="6"/>
+    <ellipse cx="100" cy="450" rx="19" ry="6" transform="rotate(58 100 450)" fill="#4fc3f7" stroke-width="3"/>
+
+    <!-- wrist -->
+    <circle cx="224" cy="372" r="15" fill="#5b6773" stroke-width="5"/>
+
+    <!-- hand: palm behind the handle, fingers wrapped round in front -->
+    <rect x="214" y="330" width="36" height="64" rx="13" fill="#e9eef3" stroke-width="6"/>
+    <rect x="236" y="336" width="50" height="15" rx="7.5" fill="#dfe6ec" stroke-width="5"/>
+    <rect x="236" y="351" width="53" height="15" rx="7.5" fill="#dfe6ec" stroke-width="5"/>
+    <rect x="236" y="366" width="50" height="15" rx="7.5" fill="#dfe6ec" stroke-width="5"/>
+    <rect x="236" y="381" width="44" height="14" rx="7" fill="#dfe6ec" stroke-width="5"/>
+    <path d="M262 339 v9 M265 354 v9 M262 369 v9 M259 384 v8" fill="none" stroke="#9aa7b4" stroke-width="3"/>
+    <!-- thumb over the top of the grip -->
+    <rect x="218" y="316" width="54" height="17" rx="8.5" transform="rotate(-14 218 324)" fill="#e9eef3" stroke-width="5"/>
+  </g>
+</svg>
