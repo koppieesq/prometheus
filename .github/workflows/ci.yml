@@ -17,7 +17,7 @@ jobs:
           docker compose --env-file /tmp/ci.env -f stack/compose.yaml -f stack/compose.hardened.yaml config -q
           docker compose --env-file /tmp/ci.env -f stack/compose.static.yaml config -q
           docker compose --env-file /tmp/ci.env -f stack/compose.static.yaml -f stack/compose.static.hardened.yaml config -q
-          mkdir -p /tmp/ci/app && touch /tmp/ci/app.env
+          mkdir -p /tmp/ci/app && touch /tmp/ci/app.env && printf "APP_COMMAND=true\n" >> /tmp/ci.env
           docker compose --env-file /tmp/ci.env -f stack/compose.python.yaml config -q
           docker compose --env-file /tmp/ci.env -f stack/compose.python.yaml -f stack/compose.python.hardened.yaml config -q
       - name: compose config (edge)
