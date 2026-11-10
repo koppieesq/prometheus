@@ -15,6 +15,8 @@ jobs:
           printf 'SITE_NAME=ci\nSITE_DIR=/tmp/ci\n' > /tmp/ci.env
           docker compose --env-file /tmp/ci.env -f stack/compose.yaml config -q
           docker compose --env-file /tmp/ci.env -f stack/compose.yaml -f stack/compose.hardened.yaml config -q
+          docker compose --env-file /tmp/ci.env -f stack/compose.static.yaml config -q
+          docker compose --env-file /tmp/ci.env -f stack/compose.static.yaml -f stack/compose.static.hardened.yaml config -q
       - name: compose config (edge)
         run: ACME_EMAIL=ci@example.com docker compose -f edge/compose.yaml config -q
 
@@ -45,3 +47,42 @@ jobs:
       - name: logs on failure
         if: failure()
         run: bin/prm ci logs --tail 100
+
+  static:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        hardened: ["0", "1"]
+    env:
+      PRM_HARDENED: ${{ matrix.hardened }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: migrate an old HTML site (docroot in a subdirectory, awkward permissions)
+        run: |
+          mkdir -p /tmp/old/public_html/img
+          echo '<h1>old site</h1>' > /tmp/old/public_html/index.htm
+          echo 'png' > /tmp/old/public_html/img/a.png
+          echo '<?php echo "secret";' > /tmp/old/public_html/form.php
+          printf 'secret=1\n' > /tmp/old/public_html/.env
+          chmod 600 /tmp/old/public_html/img/a.png
+          bin/prm migrate-static old old.example.com --code /tmp/old
+      - name: it serves the pages and refuses scripts and dotfiles
+        run: |
+          get() { bin/prm old exec -T web wget -qO- "http://127.0.0.1$1"; }
+          code() { bin/prm old exec -T web wget -S -qO /dev/null "http://127.0.0.1$1" 2>&1 | grep -o 'HTTP/[0-9.]* [0-9]*' | tail -n1 | cut -d' ' -f2; }
+          get / | grep -q 'old site'
+          get /img/a.png | grep -q png
+          [ "$(code /form.php)" = 403 ]
+          [ "$(code /.env)" = 403 ]
+          [ "$(code /nope)" = 404 ]
+      - name: only nginx runs
+        run: |
+          [ "$(docker ps -q --filter label=com.docker.compose.project=old | wc -l)" = 1 ]
+      - name: backup
+        run: |
+          bin/prm old backup
+          ls sites/old/backups/app-*.tar.gz
+      - name: logs on failure
+        if: failure()
+        run: bin/prm old logs --tail 100

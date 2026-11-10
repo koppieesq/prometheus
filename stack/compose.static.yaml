@@ -1,0 +1,43 @@
+# A static site: nginx and nothing else. No php-fpm, no MariaDB, no secrets.
+# Used instead of compose.yaml when a site's APP_TYPE is `static` (prm picks it).
+# Hand-written HTML, a Hugo/Jekyll/Vite build checked into git, an archived site.
+#
+#   prm new brochure brochure.example.com --type static
+#   prm migrate-static brochure brochure.example.com --code /var/www/brochure
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+services:
+  web:
+    restart: unless-stopped
+    init: true
+    logging: *logging
+    security_opt: ["no-new-privileges:true"]
+    image: nginx:${NGINX_VERSION:-1.28}-alpine
+    environment:
+      NGINX_ENVSUBST_FILTER: "^(DOCROOT)$$"
+      DOCROOT: ${DOCROOT:-.}
+    volumes:
+      - ${SITE_DIR:?run via bin/prm}/app:/var/www/html:ro
+      - ./nginx/nginx-global.conf:/etc/nginx/conf.d/00-global.conf:ro
+      - ./nginx/apps/static.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./nginx/snippets:/etc/nginx/templates/snippets:ro
+    tmpfs:
+      - /var/cache/nginx/micro:size=16m   # nginx-global.conf declares the fastcgi cache path; unused here
+    networks:
+      edge:
+        aliases: ["${SITE_NAME:?run via bin/prm}-web"]
+    mem_limit: ${WEB_MEM_LIMIT:-48m}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+networks:
+  edge:
+    name: ${EDGE_NETWORK:-edge}
+    external: true

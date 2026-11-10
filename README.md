@@ -102,7 +102,8 @@ In a monorepo, `--dir <subdirectory>` says where in the clone the app lives: `--
 serves `cms/web` and runs `composer`, `drush` and cron in `cms/`.
 
 App types (`--type`): `generic` (front controller: Laravel, Symfony, plain PHP), `drupal`, `headless`
-(SPA at `/` + PHP API + websocket at `/ws`, single origin), `spa` (static only).
+(SPA at `/` + PHP API + websocket at `/ws`, single origin), `spa` (static only, but with the full PHP and database stack behind it), `static` (nginx
+and nothing else: no PHP, no database; for plain HTML).
 Sizes (`--size`): `small` / `medium` / `large`, see [docs/sizing.md](docs/sizing.md).
 
 ## Moving an existing Drupal multisite into Docker on the same VPS
@@ -305,6 +306,44 @@ bin/prm alpha deploy
 
 `settings.prm.php` and the uploads aren't tracked, so `reset --hard` leaves them alone.
 
+## Moving old HTML sites in
+
+Sites that are only files (hand-written HTML, an archived site, a Hugo or Jekyll build checked into git)
+don't need PHP or a database. `prm migrate-static` gives each one its own stack of a single nginx
+container, about 10 MB resident, behind the same Caddy edge:
+
+```sh
+sudo bin/prm migrate-static brochure brochure.example.com,www.brochure.example.com \
+  --code /var/www/brochure
+```
+
+`--code` is the old site's directory on the host. It's only read: `migrate-static` works on a copy
+in `sites/brochure/app`. It finds the site root by itself: `--code` itself, a conventional
+subdirectory (`public_html`, `www`, `htdocs`, `dist`...), or the only directory holding an
+`index.html` or `index.htm`. If there are several, it lists them and you choose with `--docroot`.
+It makes the copy readable by nginx (a tree that was `0640 www-data` would otherwise answer 403 to
+everything), starts the site and reloads the edge if it's running.
+
+Before it copies anything it warns about what the old server did that nginx alone won't:
+
+- **Scripts** (`*.php`, `*.cgi`, `*.pl`, `*.asp`...) are never run, and nginx refuses to serve them
+  rather than hand out their source. If a "static" site has a contact form after all, use
+  `prm new <site> <domains> --type generic` for it instead.
+- **`.htaccess`** is Apache's and is ignored. The redirects, rewrites and `ErrorDocument` lines it
+  finds are printed so you can port them to `edge/sites/<site>.caddy` (`redir`, `rewrite`), then
+  `prm edge reload`.
+- **`.shtml`** server-side includes aren't processed.
+- **Symlinks** that point outside the site would dangle inside the container.
+
+Testing and cutover are the same as for a Drupal site, including serving it from the host's web server
+on a loopback port while that still owns 80/443 (steps 4 and 5 above). Use the web container's `80`
+and a free `127.0.0.1` port in `compose.override.yaml`. A static site has no database, so
+`prm <site> backup` archives `app/` into `backups/app-<ts>.tar.gz`, and `prm <site> deploy` has nothing to
+build: to update the site, change the files (or `git pull` in `sites/<name>/app`) and they are live.
+
+A new site of this kind that isn't a migration is `prm new <site> <domains> --type static`.
+`composer`, `drush`, `npm` and `restore` refuse to run on one.
+
 ## Commands
 
 ```
@@ -316,6 +355,7 @@ prm all <command> [args]            run a site command against every site
 prm update                          pull, rebuild and restart every site; report PHP versions
 prm migrate <site> <domains> --code <dir> --db <dump> [--files <dir>] [--from-site <dir>]
             [--docroot <path>] [--size S]
+prm migrate-static <site> <domains> --code <dir> [--docroot <path>]   plain HTML: nginx only
 prm edge up|down|reload|logs|ps|restart
 prm <site> up|down|restart|ps|logs|stats|deploy|sh
 prm <site> backup | restore <db-file.sql.gz>
@@ -331,7 +371,7 @@ edge/                  shared Caddy proxy (one per host); sites/<name>.caddy gen
 stack/                 the per-site compose file, nginx/mariadb config, hardening overlay
 images/php/            php-fpm image (runtime) + tools image (composer, git)
 scripts/               VPS bootstrap, systemd backup timer
-examples/              hello (smoke test), drupal, headless-spa (Rail Baron shape)
+examples/              hello (smoke test), static, drupal, headless-spa (Rail Baron shape)
 sites/                 per-site state: app/, files/, secrets/, backups/, site.env (gitignored)
 docs/                  architecture, sizing, operations, local dev, trying it on macOS; logo.svg
 ```

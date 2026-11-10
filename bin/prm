@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # prm - run several small LEMP sites on one VPS.
-#   prm new <site> <domain[,domain...]> [--type generic|drupal|headless|spa] [--size small|medium|large] [--example hello]
+#   prm new <site> <domain[,domain...]> [--type generic|drupal|headless|spa|static] [--size small|medium|large] [--example hello]
 #           [--dir <subdir of app/>] [--spa-root <build dir, under --dir>]
 #   prm demo <name>                     throwaway Drupal site on <name>.localhost, installed and serving
 #   prm ls
@@ -8,6 +8,7 @@
 #   prm all <command> [args]            run a site command against every site
 #   prm update                          pull new base images, rebuild and restart every site
 #   prm migrate <site> <domains> --code <dir> --db <dump> [--files <dir>] [--from-site <dir>] [--docroot <path>]   import an existing site
+#   prm migrate-static <site> <domains> --code <dir> [--docroot <path>]   import an existing plain-HTML site (nginx only)
 #   prm edge up|down|reload|logs|ps
 #   prm <site> up|down|restart|ps|logs|deploy|backup|restore <file>|sh|exec|compose ...
 #   prm <site> composer|drush|npm|npx ...
@@ -17,6 +18,8 @@ ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 SITES_DIR="${PRM_SITES_DIR:-$ROOT/sites}"
 STACK="$ROOT/stack/compose.yaml"
 HARDENED="$ROOT/stack/compose.hardened.yaml"
+STATIC_STACK="$ROOT/stack/compose.static.yaml"   # APP_TYPE=static: nginx only
+STATIC_HARDENED="$ROOT/stack/compose.static.hardened.yaml"
 EDGE_DIR="$ROOT/edge"
 DEMO_PASS="${PRM_DEMO_PASS:-admin}" # `prm demo` only; never used by a real site
 
@@ -72,6 +75,8 @@ project_dir() { # the site's project root inside the containers: composer, npm, 
   if [ "$p" = . ]; then echo /var/www/html; else echo "/var/www/html/$p"; fi
 }
 
+is_static() { [ "$(envget "$(site_env "$1")" APP_TYPE)" = static ]; }
+
 site_env() { local e="$SITES_DIR/$1/site.env"; [ -f "$e" ] || die "unknown site '$1' (missing $e)"; echo "$e"; }
 
 dc() { # dc <site> <compose args...>
@@ -80,8 +85,9 @@ dc() { # dc <site> <compose args...>
   export BUILDX_NO_DEFAULT_ATTESTATIONS=1
   local site="$1"; shift
   local env; env="$(site_env "$site")"
-  local files=(-f "$STACK")
-  [ "${PRM_HARDENED:-0}" = 1 ] && files+=(-f "$HARDENED")
+  local files=(-f "$STACK") hardened="$HARDENED"
+  if [ "$(envget "$env" APP_TYPE)" = static ]; then files=(-f "$STATIC_STACK"); hardened="$STATIC_HARDENED"; fi
+  [ "${PRM_HARDENED:-0}" = 1 ] && files+=(-f "$hardened")
   [ -f "$SITES_DIR/$site/compose.override.yaml" ] && files+=(-f "$SITES_DIR/$site/compose.override.yaml")
   local profiles; profiles="$(envget "$env" COMPOSE_PROFILES)"
   COMPOSE_PROFILES="$profiles" docker compose -p "$site" --env-file "$env" "${files[@]}" "$@"
@@ -91,6 +97,7 @@ prepare_site_dirs() { # the nested files mount needs its target to exist inside 
   local site="$1" env dir files
   env="$(site_env "$site")"
   dir="$(envget "$env" SITE_DIR)"; files="$(envget "$env" FILES_PATH public/files)"
+  if is_static "$site"; then mkdir -p "$dir/app" "$dir/backups"; return 0; fi   # no uploads, no php
   mkdir -p "$dir/app/$files" "$dir/files" "$dir/backups"
   [ -f "$dir/php.ini" ] || : > "$dir/php.ini"
 }
@@ -119,7 +126,7 @@ cmd_new() {
   if [ -z "$site" ] || [ -z "$domains" ]; then die "usage: prm new <site> <domain[,domain]> [--type T] [--size S] [--example E] [--dir D] [--spa-root R]"; fi
   shift 2
   [[ "$site" =~ ^[a-z][a-z0-9-]{1,30}$ ]] || die "site name must match ^[a-z][a-z0-9-]{1,30}$"
-  local type=generic size=small example="" sub="" spa_root=""
+  local type=generic size=small example="" sub="" spa_root="" docroot_sub=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --type) type="$2"; shift 2;;
@@ -134,6 +141,7 @@ cmd_new() {
   case "$sub" in /*|..|../*|*/..|*/../*) die "--dir must be a path inside app/, like kands-react";; esac
   if [ -n "$sub" ] && [ "$type" = headless ]; then die "--dir isn't supported for --type headless"; fi
   if [ -n "$spa_root" ] && [ "$type" != spa ]; then die "--spa-root is for --type spa"; fi
+  if [ "$type" = static ] && [ -n "$sub" ]; then docroot_sub="$sub"; sub=""; fi   # for a static site --dir just is the docroot
   local dir="$SITES_DIR/$site" w
   [ ! -e "$dir/site.env" ] || die "site '$site' already exists (remove it with: prm rm $site)"
   # checked first: failing on edge/sites at the end would leave a half-made site
@@ -155,7 +163,8 @@ cmd_new() {
     headless) docroot=backend/web; files=backend/web/sites/default/files; profiles="cache,cron,ws"
               extra=$'SPA_ROOT=frontend/dist\nCRON_COMMAND=vendor/bin/drush cron\nCRON_WORKDIR=/var/www/html/backend\nDEPLOY_COMMAND=cd backend && vendor/bin/drush deploy\nWS_DIR=ws-server';;
     spa)      files=files; extra="SPA_ROOT=${spa_root:-dist}";;
-    *) die "unknown --type '$type' (generic|drupal|headless|spa)";;
+    static)   docroot="${docroot_sub:-.}"; files="";;   # nginx only: app/ is the site, nothing is writable
+    *) die "unknown --type '$type' (generic|drupal|headless|spa|static)";;
   esac
   if [ -n "$sub" ]; then   # everything the type knows about lives under the subdirectory
     docroot="$sub/$docroot"; files="$sub/$files"
@@ -163,21 +172,25 @@ cmd_new() {
     extra="${extra:+$extra$'\n'}PROJECT_DIR=$sub"
     [ "$type" != drupal ] || extra="$extra"$'\n'"CRON_WORKDIR=/var/www/html/$sub"
   fi
-  local sizing
-  case "$size" in
+  local sizing=""
+  [ "$type" = static ] || case "$size" in
     small)  sizing=$'DB_BUFFER_POOL=128M\nDB_MEM_LIMIT=384m\nPHP_FPM_MAX_CHILDREN=6\nPHP_MEM_LIMIT=640m';;
     medium) sizing=$'DB_BUFFER_POOL=384M\nDB_MEM_LIMIT=768m\nPHP_FPM_MAX_CHILDREN=12\nPHP_MEM_LIMIT=1280m';;
     large)  sizing=$'DB_BUFFER_POOL=1G\nDB_MEM_LIMIT=1536m\nPHP_FPM_MAX_CHILDREN=24\nPHP_MEM_LIMIT=2560m\nPHP_FPM_PM=dynamic';;
     *) die "unknown --size '$size' (small|medium|large)";;
   esac
 
-  mkdir -p "$dir"/{app,files,secrets,backups}
-  chmod 700 "$dir/secrets"
-  random_secret > "$dir/secrets/db_password"
-  random_secret > "$dir/secrets/db_root_password"
-  chmod 644 "$dir/secrets/db_password"      # readable inside the container (dir is 0700 on the host)
-  chmod 600 "$dir/secrets/db_root_password"
-  : > "$dir/php.ini"
+  if [ "$type" = static ]; then
+    mkdir -p "$dir"/{app,backups}   # no database, no uploads, so no secrets/ or files/ either
+  else
+    mkdir -p "$dir"/{app,files,secrets,backups}
+    chmod 700 "$dir/secrets"
+    random_secret > "$dir/secrets/db_password"
+    random_secret > "$dir/secrets/db_root_password"
+    chmod 644 "$dir/secrets/db_password"      # readable inside the container (dir is 0700 on the host)
+    chmod 600 "$dir/secrets/db_root_password"
+    : > "$dir/php.ini"
+  fi
 
   {
     echo "# Generated by 'prm new'. Full reference of knobs: stack/site.env.example"
@@ -185,9 +198,9 @@ cmd_new() {
     echo "SITE_DIR=$dir"
     echo "APP_TYPE=$type"
     echo "DOCROOT=$docroot"
-    echo "FILES_PATH=$files"
+    [ -z "$files" ] || echo "FILES_PATH=$files"
     echo "COMPOSE_PROFILES=$profiles"
-    echo "$sizing"
+    [ -z "$sizing" ] || echo "$sizing"
     [ -z "$extra" ] || echo "$extra"
   } > "$dir/site.env"
 
@@ -195,13 +208,15 @@ cmd_new() {
     [ -d "$ROOT/examples/$example/app" ] || die "no example '$example' with an app/ directory"
     cp -a "$ROOT/examples/$example/app/." "$dir/app/"
   fi
-  mkdir -p "$dir/app/$files"
-  # php-fpm runs as www-data (uid 33): it must be able to write uploads.
-  if chown 33:33 "$dir/files" 2>/dev/null; then :; else
-    chmod 0777 "$dir/files"
-    info "could not chown files/ to uid 33; made it world-writable instead"
-    info "expected off Linux, where the docker VM shares files as you; on Linux tighten it with:"
-    info "  sudo chown -R 33:33 '$dir/files' && sudo chmod 755 '$dir/files'"
+  if [ "$type" != static ]; then
+    mkdir -p "$dir/app/$files"
+    # php-fpm runs as www-data (uid 33): it must be able to write uploads.
+    if chown 33:33 "$dir/files" 2>/dev/null; then :; else
+      chmod 0777 "$dir/files"
+      info "could not chown files/ to uid 33; made it world-writable instead"
+      info "expected off Linux, where the docker VM shares files as you; on Linux tighten it with:"
+      info "  sudo chown -R 33:33 '$dir/files' && sudo chmod 755 '$dir/files'"
+    fi
   fi
 
   local list="${domains//,/, }"
@@ -213,7 +228,7 @@ $list {
 }
 EOF
   info "site '$site' created in $dir"
-  if [ -n "$(ls -A "$dir/app" 2>/dev/null | grep -v "^${files%%/*}$")" ]; then
+  if find "$dir/app" -mindepth 1 -maxdepth 1 ! -name "${files%%/*}" 2>/dev/null | grep -q .; then
     info "next: prm $site up && prm edge reload"
   else
     info "next: put your app in $dir/app, then: prm $site up && prm edge reload"
@@ -348,13 +363,15 @@ cmd_update() { # pull new base images, rebuild, restart every site, then prove w
   local site rc=0 failed="" running
   for site in $(site_names); do
     info "--- $site ---"
-    if dc "$site" build --pull && dc "$site" up -d --remove-orphans; then :; else
+    if { if is_static "$site"; then dc "$site" pull; else dc "$site" build --pull; fi; } \
+       && dc "$site" up -d --remove-orphans; then :; else
       rc=1; failed="$failed $site"; continue
     fi
   done
   [ -n "$failed" ] && info "failed:$failed"
   info "--- versions now running ---"
   for site in $(site_names); do
+    if is_static "$site"; then printf '%-20s static (nginx only)\n' "$site"; continue; fi
     running="$(dc "$site" exec -T php php -r 'echo PHP_VERSION;' 2>/dev/null)" || running="(php not running)"
     printf '%-20s php %s\n' "$site" "$running"
   done
@@ -387,8 +404,9 @@ cmd_migrate() { # lift one site out of an existing (multi)site onto this host
   # in a monorepo drupal sits in a subdirectory (drupal/web, apps/cms/web...).
   local found n
   if [ -n "$docroot" ]; then
-    [ -f "$code/$docroot/index.php" ] && [ -d "$code/$docroot/core" ] \
-      || die "--docroot: no drupal at $code/$docroot (expected index.php and core/)"
+    if [ ! -f "$code/$docroot/index.php" ] || [ ! -d "$code/$docroot/core" ]; then
+      die "--docroot: no drupal at $code/$docroot (expected index.php and core/)"
+    fi
   elif [ -f "$code/web/index.php" ]; then docroot=web
   elif [ -f "$code/index.php" ]; then docroot=.
   else
@@ -506,9 +524,116 @@ cmd_migrate() { # lift one site out of an existing (multi)site onto this host
   info "left in place for you to review: any web/sites/<name>/ from the old multisite"
 }
 
+cmd_migrate_static() { # lift a plain-HTML site off the old web server: nginx only, no php, no database
+  local site="${1:-}" domains="${2:-}" code="" docroot=""
+  if [ -z "$site" ] || [ -z "$domains" ]; then
+    die "usage: prm migrate-static <site> <domain[,domain]> --code <dir> [--docroot <path>]"
+  fi
+  shift 2
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --code)    code="$2"; shift 2;;
+      --docroot) docroot="${2%/}"; shift 2;;
+      *) die "unknown option $1 (a static site has no database, uploads or size to give)";;
+    esac
+  done
+  [ -n "$code" ] || die "--code <dir> is required (the site's files to copy in)"
+  [ -d "$code" ] || die "--code: no such directory: $code"
+  case "$docroot" in /*|..|../*|*/..|*/../*) die "--docroot must be a path inside --code, like public_html";; esac
+  [ "$docroot" != . ] || docroot=""
+
+  # Where is the site root? The directory holding index.html: --code itself, a
+  # conventional subdirectory (public_html, www, dist...), or the only place one is.
+  local found n d
+  if [ -n "$docroot" ]; then
+    [ -d "$code/$docroot" ] || die "--docroot: no such directory: $code/$docroot"
+  elif has_index "$code"; then docroot=.
+  else
+    for d in public_html public html www htdocs dist build _site docs; do
+      if has_index "$code/$d"; then docroot="$d"; break; fi
+    done
+    if [ -z "$docroot" ]; then
+      found="$(find "$code" -maxdepth 4 \( -name node_modules -o -name vendor -o -name .git \) -prune \
+        -o \( -name index.html -o -name index.htm \) -print | sed 's|/[^/]*$||' | sort -u)"
+      n="$(printf '%s' "$found" | grep -c . || true)"
+      [ "$n" != 0 ] || die "--code: no index.html or index.htm within 4 levels of $code - is this the site? (or pass --docroot)"
+      [ "$n" = 1 ] || die "--code: $n directories with an index page in $code; pick one with --docroot:"$'\n'"${found//"$code"\//  }"
+      docroot="${found#"$code"/}"
+      [ "$docroot" != "$found" ] || docroot=.   # the index sits in --code itself
+    fi
+    info "site root found at $docroot"
+  fi
+  local root="$code"; [ "$docroot" = . ] || root="$code/$docroot"
+  has_index "$root" || info "WARNING: no index.html or index.htm in $root; the home page will be a 404"
+
+  # Everything that can fail for lack of rights is checked before anything is created.
+  if [ "$(id -u)" != 0 ]; then
+    local bad
+    info "checking $code is readable"
+    bad="$(first_unreadable "$code")" || true
+    [ -z "$bad" ] || die "cannot read ${bad#find: } - re-run as root (sudo bin/prm migrate-static ...)"
+  fi
+
+  static_survey "$root"
+
+  local dir="$SITES_DIR/$site"
+  cmd_new "$site" "$domains" --type static
+  envset "$dir/site.env" DOCROOT "$docroot"
+
+  info "copying the site from $code"
+  cp -R "$code/." "$dir/app/"
+  # nginx runs as its own user, not the old server's: a tree that was 0640 www-data would be all 403s
+  chmod -R u+w "$dir/app"
+  chmod -R a+rX "$dir/app"
+
+  cmd_site "$site" up --wait
+  edge_reload_if_up
+
+  info "migrated '$site' -> https://${domains%%,*}/"
+  info "test it before the DNS or vhost changes:"
+  info "  docker run --rm --network $(edge_network) curlimages/curl -sI -H 'Host: ${domains%%,*}' http://$site-web/"
+  info "cut over as for any prm site: see 'Cut over, one site at a time' in the README"
+  info "$code was only read. If this went wrong: prm rm $site, then run it again"
+}
+
+has_index() { [ -f "$1/index.html" ] || [ -f "$1/index.htm" ]; }
+
+# static_survey <site root>: say what an old HTML site relied on that nginx alone won't do.
+# Warnings only; the migration goes ahead.
+static_survey() {
+  local root="$1" out f
+  out="$(find "$root" \( -name .git -o -name node_modules \) -prune -o -type f \
+    \( -name '*.php' -o -name '*.php[0-9]' -o -name '*.phtml' -o -name '*.cgi' -o -name '*.pl' -o -name '*.asp' -o -name '*.aspx' -o -name '*.jsp' \) -print 2>/dev/null | head -n 5)"
+  if [ -n "$out" ]; then
+    info "WARNING: this site has server-side scripts, which a static site never runs (nginx refuses to serve them):"
+    printf '%s\n' "$out" | sed "s|^$root/|    |" >&2
+    info "  a contact form or counter will break. If the site needs PHP, use 'prm new <site> <domains> --type generic' instead."
+  fi
+  out="$(find "$root" \( -name .git -o -name node_modules \) -prune -o -type f -name '*.shtml' -print 2>/dev/null | head -n 3)"
+  if [ -n "$out" ]; then
+    info "WARNING: .shtml pages use server-side includes, which are not processed here; the directives will show up as text:"
+    printf '%s\n' "$out" | sed "s|^$root/|    |" >&2
+  fi
+  out="$(find "$root" \( -name .git -o -name node_modules \) -prune -o -type f -name .htaccess -print 2>/dev/null | head -n 5)"
+  if [ -n "$out" ]; then
+    info "WARNING: .htaccess files are Apache's, and nginx ignores them. Redirects, rewrites and error pages in them are lost:"
+    printf '%s\n' "$out" | while IFS= read -r f; do
+      printf '    %s\n' "${f#"$root"/}" >&2
+      grep -iE '^[[:space:]]*(Redirect|RedirectMatch|RewriteRule|ErrorDocument|AddType|AuthType)\b' "$f" 2>/dev/null | head -n 8 | sed 's/^/        /' >&2 || true
+    done
+    info "  port what matters to edge/sites/<site>.caddy (redir, rewrite), then: prm edge reload"
+  fi
+  out="$(find "$root" -type l -exec sh -c 'for f; do case "$(readlink "$f")" in /*) echo "$f";; esac; done' sh {} + 2>/dev/null | head -n 3)"
+  if [ -n "$out" ]; then
+    info "WARNING: symlinks pointing outside the site would dangle inside the container:"
+    printf '%s\n' "$out" | sed "s|^$root/|    |" >&2
+  fi
+  return 0
+}
+
 cmd_rm() { # delete a site and everything it owns; works on a half-made one too
   local site="${1:-}" dir ans id
-  [ -n "$site" ] && [ $# -eq 1 ] || die "usage: prm rm <site>"
+  if [ -z "$site" ] || [ $# -ne 1 ]; then die "usage: prm rm <site>"; fi
   [[ "$site" =~ ^[a-z][a-z0-9-]{1,30}$ ]] || die "not a site name: $site"
   dir="$SITES_DIR/$site"
   local label="label=com.docker.compose.project=$site"
@@ -567,6 +692,15 @@ cmd_backup() {
   env="$(site_env "$site")"; dir="$(envget "$env" SITE_DIR)"
   keep="${PRM_BACKUP_KEEP:-14}"; ts="$(date -u +%Y%m%dT%H%M%SZ)"
   mkdir -p "$dir/backups"
+  if is_static "$site"; then   # the site is its files: no database, and no uploads outside app/
+    info "archiving the site"
+    tar -C "$dir" -czf "$dir/backups/app-$ts.tar.gz" app
+    # shellcheck disable=SC2012
+    ls -1t "$dir"/backups/app-*.tar.gz 2>/dev/null | tail -n +$((keep + 1)) | xargs -r rm --
+    info "backup written: $dir/backups/app-$ts.tar.gz"
+    if [ -n "${PRM_BACKUP_HOOK:-}" ]; then "$PRM_BACKUP_HOOK" "$site" "$dir/backups"; fi
+    return 0
+  fi
   info "dumping database"
   # single quotes are intentional: the command substitution must run inside the container
   # shellcheck disable=SC2016
@@ -604,6 +738,14 @@ cmd_site() {
   site_env "$site" >/dev/null
   ensure_network
   prepare_site_dirs "$site"
+  if is_static "$site"; then   # nginx only: what needs php, a database or node doesn't apply
+    case "$sub" in
+      composer|drush|npm|npx|node|restore) die "'$sub' doesn't apply: '$site' is a static site (nginx only, no php, database or node)";;
+      sh)     dc "$site" exec web sh; return;;
+      deploy) info "static site: nothing to build; new files in sites/$site/app are already live"
+              dc "$site" up -d --remove-orphans; return;;
+    esac
+  fi
   case "$sub" in
     up)      dc "$site" up -d --build "$@";;
     down)    dc "$site" down "$@";;
@@ -636,6 +778,7 @@ case "${1:-}" in
   demo) shift; cmd_demo "$@";;
   all)  shift; cmd_all "$@";;
   migrate) shift; cmd_migrate "$@";;
+  migrate-static) shift; cmd_migrate_static "$@";;
   update) cmd_update;;
   ls)   cmd_ls;;
   rm)   shift; cmd_rm "$@";;

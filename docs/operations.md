@@ -15,6 +15,9 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now prm-backup@blog.timer
 ```
 
+A static site (`--type static`) has no database: its backup is `backups/app-<ts>.tar.gz`, the whole of
+`app/`, with the same retention. There is nothing to restore into; unpack it over `app/`.
+
 **Backups on the same disk are not backups.** Set `PRM_BACKUP_HOOK` to a script that receives
 `<site> <backups-dir>` and pushes offsite (restic, rclone, rsync). Test a restore on a scratch site.
 Also back up `sites/<name>/secrets/` and the Caddy `caddy_data` volume (or accept re-issuing certs).
@@ -28,6 +31,9 @@ bin/prm blog deploy        # runs DEPLOY_COMMAND (e.g. drush deploy), recreates 
 ```
 
 ## Migrating an existing site in
+
+(An old site that is only HTML files has its own command, `prm migrate-static`, with no database to dump.
+See "Moving old HTML sites in" in the README.)
 
 `prm migrate` lifts a site off another host into its own stack here:
 

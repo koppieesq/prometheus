@@ -1,0 +1,27 @@
+# Plain files: a hand-written HTML site. No PHP, no database, no build step.
+server {
+	listen 80 default_server;
+	server_name _;
+	root /var/www/html/${DOCROOT};
+	index index.html index.htm;
+	# Behind the edge, nginx would redirect /about to http://host/about/; keep it relative.
+	absolute_redirect off;
+
+	include /etc/nginx/conf.d/snippets/common-deny.conf;
+
+	# There is no PHP here. Without this, nginx would hand a leftover script out as a
+	# download, and with it the database password hard-coded in it.
+	location ~* \.(?:php[0-9]?|phtml|phps|inc|cgi|pl|py|asp|aspx|jsp)$ { deny all; }
+
+	error_page 404 /404.html;
+	location = /404.html { internal; }
+
+	location / { try_files $uri $uri/ =404; }
+
+	# Hand-edited files change, so no year-long immutable caching as for built SPA assets.
+	location ~* \.(?:css|js|mjs|png|jpe?g|gif|ico|svg|webp|avif|woff2?|ttf|pdf)$ {
+		expires 7d;
+		access_log off;
+		try_files $uri =404;
+	}
+}
