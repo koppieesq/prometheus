@@ -70,7 +70,7 @@ jobs:
       - name: it serves the pages and refuses scripts and dotfiles
         run: |
           get() { bin/prm old exec -T web wget -qO- "http://127.0.0.1$1"; }
-          code() { bin/prm old exec -T web wget -S -qO /dev/null "http://127.0.0.1$1" 2>&1 | awk '/HTTP\//{c=$2} END{print c}'; }
+          code() { bin/prm old exec -T web wget -S -qO /dev/null "http://127.0.0.1$1" 2>&1 | grep -o 'HTTP/[0-9.]* [0-9]*' | tail -n1 | cut -d' ' -f2; }
           get / | grep -q 'old site'
           get /img/a.png | grep -q png
           [ "$(code /form.php)" = 403 ]

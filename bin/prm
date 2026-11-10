@@ -228,7 +228,7 @@ $list {
 }
 EOF
   info "site '$site' created in $dir"
-  if [ -n "$(ls -A "$dir/app" 2>/dev/null | grep -v "^${files%%/*}$")" ]; then
+  if find "$dir/app" -mindepth 1 -maxdepth 1 ! -name "${files%%/*}" 2>/dev/null | grep -q .; then
     info "next: prm $site up && prm edge reload"
   else
     info "next: put your app in $dir/app, then: prm $site up && prm edge reload"
@@ -404,8 +404,9 @@ cmd_migrate() { # lift one site out of an existing (multi)site onto this host
   # in a monorepo drupal sits in a subdirectory (drupal/web, apps/cms/web...).
   local found n
   if [ -n "$docroot" ]; then
-    [ -f "$code/$docroot/index.php" ] && [ -d "$code/$docroot/core" ] \
-      || die "--docroot: no drupal at $code/$docroot (expected index.php and core/)"
+    if [ ! -f "$code/$docroot/index.php" ] || [ ! -d "$code/$docroot/core" ]; then
+      die "--docroot: no drupal at $code/$docroot (expected index.php and core/)"
+    fi
   elif [ -f "$code/web/index.php" ]; then docroot=web
   elif [ -f "$code/index.php" ]; then docroot=.
   else
@@ -632,7 +633,7 @@ static_survey() {
 
 cmd_rm() { # delete a site and everything it owns; works on a half-made one too
   local site="${1:-}" dir ans id
-  [ -n "$site" ] && [ $# -eq 1 ] || die "usage: prm rm <site>"
+  if [ -z "$site" ] || [ $# -ne 1 ]; then die "usage: prm rm <site>"; fi
   [[ "$site" =~ ^[a-z][a-z0-9-]{1,30}$ ]] || die "not a site name: $site"
   dir="$SITES_DIR/$site"
   local label="label=com.docker.compose.project=$site"
