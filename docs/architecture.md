@@ -7,6 +7,9 @@
 - **site stack** (one per site, own compose project): `web` (nginx) -> `php` (php-fpm) -> `db` (MariaDB).
   Only `web` joins `edge`. `php` and `db` live on the site's private network and cannot be reached from
   other sites.
+- **static sites** (`APP_TYPE=static`): the stack is `web` alone, from `stack/compose.static.yaml` instead of
+  `compose.yaml`. No `php`, `db`, secrets or uploads mount; the whole `app/` is served read-only. `prm` picks
+  the compose file, so every site command (`up`, `logs`, `backup`...) works as usual.
 - **profiles**: `cache` (valkey), `cron` (periodic command), `ws` (Node websocket). Tooling containers
   (`tools`: composer/drush, `node`: npm) exist only for `prm <site> composer|drush|npm`.
 
