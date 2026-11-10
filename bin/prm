@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # prm - run several small LEMP sites on one VPS.
-#   prm new <site> <domain[,domain...]> [--type generic|drupal|headless|spa|static] [--size small|medium|large] [--example hello]
-#           [--dir <subdir of app/>] [--spa-root <build dir, under --dir>]
+#   prm new <site> <domain[,domain...]> [--type generic|drupal|headless|spa|static|python] [--size small|medium|large] [--example hello]
+#           [--dir <subdir of app/>] [--spa-root <build dir, under --dir>] [--command <cmd>] [--port <n>]   (--command/--port: python)
 #   prm demo <name>                     throwaway Drupal site on <name>.localhost, installed and serving
 #   prm ls
 #   prm rm <site>                       delete a site: containers, volumes, files, edge route
@@ -9,9 +9,11 @@
 #   prm update                          pull new base images, rebuild and restart every site
 #   prm migrate <site> <domains> --code <dir> --db <dump> [--files <dir>] [--from-site <dir>] [--docroot <path>]   import an existing site
 #   prm migrate-static <site> <domains> --code <dir> [--docroot <path>]   import an existing plain-HTML site (nginx only)
+#   prm route <site> <path>... --on <host-site>   serve <path>/* of another site's hostname from <site>
 #   prm edge up|down|reload|logs|ps
 #   prm <site> up|down|restart|ps|logs|deploy|backup|restore <file>|sh|exec|compose ...
 #   prm <site> composer|drush|npm|npx ...
+#   prm <site> run <command...>         python sites: a one-off command in the app's image, e.g. a data import
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
@@ -20,6 +22,8 @@ STACK="$ROOT/stack/compose.yaml"
 HARDENED="$ROOT/stack/compose.hardened.yaml"
 STATIC_STACK="$ROOT/stack/compose.static.yaml"   # APP_TYPE=static: nginx only
 STATIC_HARDENED="$ROOT/stack/compose.static.hardened.yaml"
+PYTHON_STACK="$ROOT/stack/compose.python.yaml"   # APP_TYPE=python: one app container
+PYTHON_HARDENED="$ROOT/stack/compose.python.hardened.yaml"
 EDGE_DIR="$ROOT/edge"
 DEMO_PASS="${PRM_DEMO_PASS:-admin}" # `prm demo` only; never used by a real site
 
@@ -76,6 +80,7 @@ project_dir() { # the site's project root inside the containers: composer, npm, 
 }
 
 is_static() { [ "$(envget "$(site_env "$1")" APP_TYPE)" = static ]; }
+is_python() { [ "$(envget "$(site_env "$1")" APP_TYPE)" = python ]; }
 
 site_env() { local e="$SITES_DIR/$1/site.env"; [ -f "$e" ] || die "unknown site '$1' (missing $e)"; echo "$e"; }
 
@@ -86,7 +91,10 @@ dc() { # dc <site> <compose args...>
   local site="$1"; shift
   local env; env="$(site_env "$site")"
   local files=(-f "$STACK") hardened="$HARDENED"
-  if [ "$(envget "$env" APP_TYPE)" = static ]; then files=(-f "$STATIC_STACK"); hardened="$STATIC_HARDENED"; fi
+  case "$(envget "$env" APP_TYPE)" in
+    static) files=(-f "$STATIC_STACK"); hardened="$STATIC_HARDENED";;
+    python) files=(-f "$PYTHON_STACK"); hardened="$PYTHON_HARDENED";;
+  esac
   [ "${PRM_HARDENED:-0}" = 1 ] && files+=(-f "$hardened")
   [ -f "$SITES_DIR/$site/compose.override.yaml" ] && files+=(-f "$SITES_DIR/$site/compose.override.yaml")
   local profiles; profiles="$(envget "$env" COMPOSE_PROFILES)"
@@ -98,6 +106,11 @@ prepare_site_dirs() { # the nested files mount needs its target to exist inside 
   env="$(site_env "$site")"
   dir="$(envget "$env" SITE_DIR)"; files="$(envget "$env" FILES_PATH public/files)"
   if is_static "$site"; then mkdir -p "$dir/app" "$dir/backups"; return 0; fi   # no uploads, no php
+  if is_python "$site"; then
+    mkdir -p "$dir/app" "$dir/data" "$dir/backups"
+    [ -f "$dir/app.env" ] || { : > "$dir/app.env"; chmod 600 "$dir/app.env"; }
+    return 0
+  fi
   mkdir -p "$dir/app/$files" "$dir/files" "$dir/backups"
   [ -f "$dir/php.ini" ] || : > "$dir/php.ini"
 }
@@ -126,7 +139,7 @@ cmd_new() {
   if [ -z "$site" ] || [ -z "$domains" ]; then die "usage: prm new <site> <domain[,domain]> [--type T] [--size S] [--example E] [--dir D] [--spa-root R]"; fi
   shift 2
   [[ "$site" =~ ^[a-z][a-z0-9-]{1,30}$ ]] || die "site name must match ^[a-z][a-z0-9-]{1,30}$"
-  local type=generic size=small example="" sub="" spa_root="" docroot_sub=""
+  local type=generic size=small example="" sub="" spa_root="" docroot_sub="" command="" port=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --type) type="$2"; shift 2;;
@@ -134,6 +147,8 @@ cmd_new() {
       --example) example="$2"; shift 2;;
       --dir) sub="${2%/}"; shift 2;;            # the app lives in this subdirectory of app/ (a monorepo)
       --spa-root) spa_root="${2%/}"; shift 2;;  # the frontend build output, relative to --dir
+      --command) command="$2"; shift 2;;        # python: what starts the app (it must listen on --port)
+      --port) port="$2"; shift 2;;              # python: the port it listens on
       *) die "unknown option $1";;
     esac
   done
@@ -141,6 +156,8 @@ cmd_new() {
   case "$sub" in /*|..|../*|*/..|*/../*) die "--dir must be a path inside app/, like kands-react";; esac
   if [ -n "$sub" ] && [ "$type" = headless ]; then die "--dir isn't supported for --type headless"; fi
   if [ -n "$spa_root" ] && [ "$type" != spa ]; then die "--spa-root is for --type spa"; fi
+  if [ "$type" != python ] && { [ -n "$command" ] || [ -n "$port" ]; }; then die "--command and --port are for --type python"; fi
+  if [ -n "$port" ] && ! [[ "$port" =~ ^[0-9]{2,5}$ ]]; then die "--port must be a number, like 8000"; fi
   if [ "$type" = static ] && [ -n "$sub" ]; then docroot_sub="$sub"; sub=""; fi   # for a static site --dir just is the docroot
   local dir="$SITES_DIR/$site" w
   [ ! -e "$dir/site.env" ] || die "site '$site' already exists (remove it with: prm rm $site)"
@@ -164,24 +181,36 @@ cmd_new() {
               extra=$'SPA_ROOT=frontend/dist\nCRON_COMMAND=vendor/bin/drush cron\nCRON_WORKDIR=/var/www/html/backend\nDEPLOY_COMMAND=cd backend && vendor/bin/drush deploy\nWS_DIR=ws-server';;
     spa)      files=files; extra="SPA_ROOT=${spa_root:-dist}";;
     static)   docroot="${docroot_sub:-.}"; files="";;   # nginx only: app/ is the site, nothing is writable
-    *) die "unknown --type '$type' (generic|drupal|headless|spa|static)";;
+    python)   docroot=.; files=""; port="${port:-8000}"
+              extra="APP_PORT=$port"$'\n'"APP_COMMAND=\"${command:-uvicorn main:app --host 0.0.0.0 --port $port}\"";;
+    *) die "unknown --type '$type' (generic|drupal|headless|spa|static|python)";;
   esac
   if [ -n "$sub" ]; then   # everything the type knows about lives under the subdirectory
-    docroot="$sub/$docroot"; files="$sub/$files"
+    docroot="$sub/$docroot"; [ -z "$files" ] || files="$sub/$files"
     [ "$type" != spa ] || extra="SPA_ROOT=$sub/${spa_root:-dist}"
     extra="${extra:+$extra$'\n'}PROJECT_DIR=$sub"
     [ "$type" != drupal ] || extra="$extra"$'\n'"CRON_WORKDIR=/var/www/html/$sub"
   fi
   local sizing=""
-  [ "$type" = static ] || case "$size" in
+  if [ "$type" = python ]; then
+    case "$size" in
+      small)  sizing=APP_MEM_LIMIT=512m;;
+      medium) sizing=APP_MEM_LIMIT=1g;;
+      large)  sizing=APP_MEM_LIMIT=2g;;
+      *) die "unknown --size '$size' (small|medium|large)";;
+    esac
+  elif [ "$type" != static ]; then case "$size" in
     small)  sizing=$'DB_BUFFER_POOL=128M\nDB_MEM_LIMIT=384m\nPHP_FPM_MAX_CHILDREN=6\nPHP_MEM_LIMIT=640m';;
     medium) sizing=$'DB_BUFFER_POOL=384M\nDB_MEM_LIMIT=768m\nPHP_FPM_MAX_CHILDREN=12\nPHP_MEM_LIMIT=1280m';;
     large)  sizing=$'DB_BUFFER_POOL=1G\nDB_MEM_LIMIT=1536m\nPHP_FPM_MAX_CHILDREN=24\nPHP_MEM_LIMIT=2560m\nPHP_FPM_PM=dynamic';;
     *) die "unknown --size '$size' (small|medium|large)";;
-  esac
+  esac; fi
 
   if [ "$type" = static ]; then
     mkdir -p "$dir"/{app,backups}   # no database, no uploads, so no secrets/ or files/ either
+  elif [ "$type" = python ]; then
+    mkdir -p "$dir"/{app,data,backups}   # no database: its environment is app.env, its one writable path data/
+    : > "$dir/app.env"; chmod 600 "$dir/app.env"
   else
     mkdir -p "$dir"/{app,files,secrets,backups}
     chmod 700 "$dir/secrets"
@@ -197,7 +226,7 @@ cmd_new() {
     echo "SITE_NAME=$site"
     echo "SITE_DIR=$dir"
     echo "APP_TYPE=$type"
-    echo "DOCROOT=$docroot"
+    [ "$type" = python ] || echo "DOCROOT=$docroot"
     [ -z "$files" ] || echo "FILES_PATH=$files"
     echo "COMPOSE_PROFILES=$profiles"
     [ -z "$sizing" ] || echo "$sizing"
@@ -208,7 +237,14 @@ cmd_new() {
     [ -d "$ROOT/examples/$example/app" ] || die "no example '$example' with an app/ directory"
     cp -a "$ROOT/examples/$example/app/." "$dir/app/"
   fi
-  if [ "$type" != static ]; then
+  if [ "$type" = python ]; then
+    # the app runs as www-data (uid 33): it must be able to write data/.
+    if chown 33:33 "$dir/data" 2>/dev/null; then :; else
+      chmod 0777 "$dir/data"
+      info "could not chown data/ to uid 33; made it world-writable instead"
+      info "on Linux tighten it with: sudo chown -R 33:33 '$dir/data' && sudo chmod 755 '$dir/data'"
+    fi
+  elif [ "$type" != static ]; then
     mkdir -p "$dir/app/$files"
     # php-fpm runs as www-data (uid 33): it must be able to write uploads.
     if chown 33:33 "$dir/files" 2>/dev/null; then :; else
@@ -219,12 +255,13 @@ cmd_new() {
     fi
   fi
 
-  local list="${domains//,/, }"
+  local list="${domains//,/, }" upstream="$site-web:80"
+  [ "$type" != python ] || upstream="$site-web:$port"
   mkdir -p "$EDGE_DIR/sites"
   cat > "$EDGE_DIR/sites/$site.caddy" <<EOF
 $list {
 	import common
-	reverse_proxy $site-web:80
+	reverse_proxy $upstream
 }
 EOF
   info "site '$site' created in $dir"
@@ -372,6 +409,10 @@ cmd_update() { # pull new base images, rebuild, restart every site, then prove w
   info "--- versions now running ---"
   for site in $(site_names); do
     if is_static "$site"; then printf '%-20s static (nginx only)\n' "$site"; continue; fi
+    if is_python "$site"; then
+      running="$(dc "$site" exec -T app python -c 'import platform; print(platform.python_version())' 2>/dev/null)" || running="(app not running)"
+      printf '%-20s python %s\n' "$site" "$running"; continue
+    fi
     running="$(dc "$site" exec -T php php -r 'echo PHP_VERSION;' 2>/dev/null)" || running="(php not running)"
     printf '%-20s php %s\n' "$site" "$running"
   done
@@ -631,6 +672,49 @@ static_survey() {
   return 0
 }
 
+cmd_route() { # serve a path of another site's hostname from this site: https://example.com/chat/* -> <site>
+  local site="${1:-}" host="" paths=() p m="" port=80 hostfile imp
+  if [ -z "$site" ]; then die "usage: prm route <site> <path>... --on <host-site>   (e.g. prm route bot /chat --on www)"; fi
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --on) [ $# -ge 2 ] || die "--on needs the site whose hostname serves the path"; host="$2"; shift 2;;
+      -*) die "unknown option $1";;
+      *) paths+=("$1"); shift;;
+    esac
+  done
+  if [ -z "$host" ] || [ ${#paths[@]} -eq 0 ]; then die "usage: prm route <site> <path>... --on <host-site>"; fi
+  [ "$host" != "$site" ] || die "--on names another site: '$site' already serves its own hostnames"
+  site_env "$site" >/dev/null
+  site_env "$host" >/dev/null
+  hostfile="$EDGE_DIR/sites/$host.caddy"
+  [ -f "$hostfile" ] || die "no edge route for '$host' ($hostfile)"
+  for p in "${paths[@]}"; do
+    local orig="$p"
+    p="${p%\*}"; p="${p%/}"   # /chat, /chat/ and /chat/* all mean: everything under /chat/
+    [[ "$p" =~ ^/[A-Za-z0-9._~/-]+$ ]] || die "not a usable path: '$orig' (like /chat; serving the whole hostname is what 'prm new' is for)"
+    m="${m:+$m }$p/*"
+  done
+  if is_python "$site"; then port="$(envget "$(site_env "$site")" APP_PORT 8000)"; fi
+  mkdir -p "$EDGE_DIR/sites/$host.d"
+  cat > "$EDGE_DIR/sites/$host.d/$site.caddy" <<EOF
+# Written by 'prm route $site': these paths of $host's hostnames are served by $site.
+# Deleted by 'prm rm $site'. Caddy routes by path, so /chatbot is not /chat/*.
+@prm_$site path $m
+handle @prm_$site {
+	reverse_proxy $site-web:$port
+}
+EOF
+  imp="import /etc/caddy/sites/$host.d/*.caddy"
+  if ! grep -qF "$imp" "$hostfile"; then   # once per host; directive order puts handle before reverse_proxy
+    awk -v imp="$imp" '!done && /^[[:space:]]*reverse_proxy/ { print "\t" imp; done=1 } { print }' "$hostfile" > "$hostfile.tmp" \
+      && mv "$hostfile.tmp" "$hostfile"
+    grep -qF "$imp" "$hostfile" || die "no reverse_proxy line in $hostfile to put the routes before; add '$imp' to its site block by hand"
+  fi
+  info "routing $m on $host's hostnames to $site"
+  edge_reload_if_up
+}
+
 cmd_rm() { # delete a site and everything it owns; works on a half-made one too
   local site="${1:-}" dir ans id
   if [ -z "$site" ] || [ $# -ne 1 ]; then die "usage: prm rm <site>"; fi
@@ -656,6 +740,9 @@ cmd_rm() { # delete a site and everything it owns; works on a half-made one too
     rm -rf "$dir" 2>/dev/null || die "could not delete all of $dir - it holds files you don't own; re-run with sudo"
   fi
   rm -f "$EDGE_DIR/sites/$site.caddy" || die "could not delete $EDGE_DIR/sites/$site.caddy; re-run with sudo"
+  # routes this site had on other sites' hostnames, and routes other sites had on its own
+  rm -f "$EDGE_DIR"/sites/*.d/"$site".caddy 2>/dev/null || true
+  rm -rf "$EDGE_DIR/sites/$site.d"
   edge_reload_if_up
   info "site '$site' removed"
 }
@@ -701,6 +788,15 @@ cmd_backup() {
     if [ -n "${PRM_BACKUP_HOOK:-}" ]; then "$PRM_BACKUP_HOOK" "$site" "$dir/backups"; fi
     return 0
   fi
+  if is_python "$site"; then   # no database; what the app writes is data/. app.env holds secrets and stays out (as secrets/ does)
+    info "archiving data/"
+    tar -C "$dir" -czf "$dir/backups/data-$ts.tar.gz" data
+    # shellcheck disable=SC2012
+    ls -1t "$dir"/backups/data-*.tar.gz 2>/dev/null | tail -n +$((keep + 1)) | xargs -r rm --
+    info "backup written: $dir/backups/data-$ts.tar.gz"
+    if [ -n "${PRM_BACKUP_HOOK:-}" ]; then "$PRM_BACKUP_HOOK" "$site" "$dir/backups"; fi
+    return 0
+  fi
   info "dumping database"
   # single quotes are intentional: the command substitution must run inside the container
   # shellcheck disable=SC2016
@@ -733,6 +829,14 @@ cmd_restore() {
   info "database restored from $file"
 }
 
+python_preflight() { # what `up` would otherwise report as an obscure build or crash-loop error
+  local site="$1" env dir proj
+  env="$(site_env "$site")"; dir="$(envget "$env" SITE_DIR)"; proj="$(envget "$env" PROJECT_DIR .)"
+  [ -f "$dir/app/$proj/requirements.txt" ] \
+    || die "no requirements.txt in $dir/app/$proj - put the app's code there first (the file may hold only comments)"
+  [ -s "$dir/app.env" ] || info "note: $dir/app.env is empty; the app's environment variables (API keys...) go there"
+}
+
 cmd_site() {
   local site="$1" sub="${2:-}"; shift 2 || shift 1
   site_env "$site" >/dev/null
@@ -744,6 +848,21 @@ cmd_site() {
       sh)     dc "$site" exec web sh; return;;
       deploy) info "static site: nothing to build; new files in sites/$site/app are already live"
               dc "$site" up -d --remove-orphans; return;;
+    esac
+  fi
+  if is_python "$site"; then   # one app container: no php, database or composer
+    local tty=(); [ -t 0 ] || tty=(-T)
+    case "$sub" in
+      composer|drush|npm|npx|node|restore) die "'$sub' doesn't apply: '$site' is a python site (one app container, no php or database)";;
+      sh)     dc "$site" exec app sh; return;;
+      run)    [ $# -gt 0 ] || die "usage: prm $site run <command...>"
+              python_preflight "$site"; dc "$site" run --rm ${tty[@]+"${tty[@]}"} app "$@"; return;;
+      up)     python_preflight "$site";;
+      deploy) python_preflight "$site"
+              info "rebuilding the image if requirements.txt changed, then restarting the app"
+              dc "$site" up -d --build --remove-orphans
+              dc "$site" restart app   # the code is bind-mounted; the running process still has the old one
+              return;;
     esac
   fi
   case "$sub" in
@@ -779,6 +898,7 @@ case "${1:-}" in
   all)  shift; cmd_all "$@";;
   migrate) shift; cmd_migrate "$@";;
   migrate-static) shift; cmd_migrate_static "$@";;
+  route) shift; cmd_route "$@";;
   update) cmd_update;;
   ls)   cmd_ls;;
   rm)   shift; cmd_rm "$@";;

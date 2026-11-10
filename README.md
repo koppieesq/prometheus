@@ -103,7 +103,8 @@ serves `cms/web` and runs `composer`, `drush` and cron in `cms/`.
 
 App types (`--type`): `generic` (front controller: Laravel, Symfony, plain PHP), `drupal`, `headless`
 (SPA at `/` + PHP API + websocket at `/ws`, single origin), `spa` (static only, but with the full PHP and database stack behind it), `static` (nginx
-and nothing else: no PHP, no database; for plain HTML).
+and nothing else: no PHP, no database; for plain HTML), `python` (one container running your command, e.g. a
+FastAPI service or a bot with an HTTP endpoint: no nginx, PHP or database; see below).
 Sizes (`--size`): `small` / `medium` / `large`, see [docs/sizing.md](docs/sizing.md).
 
 ## Moving an existing Drupal multisite into Docker on the same VPS
@@ -344,6 +345,36 @@ build: to update the site, change the files (or `git pull` in `sites/<name>/app`
 A new site of this kind that isn't a migration is `prm new <site> <domains> --type static`.
 `composer`, `drush`, `npm` and `restore` refuse to run on one.
 
+## Running a Python service
+
+`--type python` runs a Python app (FastAPI, Flask, a chatbot...) in a single container behind the edge. The code is
+the site's repository in `sites/<name>/app`, mounted read-only. `requirements.txt` is installed into the image, so
+`prm <site> up` rebuilds when it changes. There is no nginx, PHP or database.
+
+```sh
+git clone git@github.com:you/bot.git sites/bot/app                 # before `prm new`
+bin/prm new bot bot.example.com --type python --command "uvicorn main:app --host 0.0.0.0 --port 8000"
+$EDITOR sites/bot/app.env       # the app's environment: API keys and the like. Not in git, mode 0600
+bin/prm bot up --wait && bin/prm edge reload
+```
+
+- **Listens on a port, not TLS.** The app speaks plain HTTP on `--port` (default 8000); Caddy terminates TLS.
+- **One writable path.** `sites/<name>/data` is mounted at `/data`, and the app gets it as `PRM_DATA_DIR`.
+  Everything else is read-only, so write generated files (indexes, caches) there. `prm <site> backup` archives it.
+- **One-off commands** run in the app's image: `prm bot run python import.py --url ...`.
+- **Deploys** are `git pull` + `prm bot deploy` (rebuilds if `requirements.txt` changed, then restarts: the code is
+  mounted, but the running process has already loaded the old one).
+- `--size` sets the memory limit (512m / 1g / 2g); `PYTHON_VERSION` in `site.env` picks the interpreter (default 3.12).
+- `composer`, `drush`, `npm` and `restore` refuse to run on one.
+
+Putting a service under a path of another site's hostname, with no CORS, is `prm route`:
+
+```sh
+bin/prm route bot /chat --on www        # https://<www's domain>/chat/* is served by bot; /chatbot is not
+```
+
+Worked example, with the cutover from a systemd service: [docs/python-apps.md](docs/python-apps.md).
+
 ## Commands
 
 ```
@@ -356,11 +387,13 @@ prm update                          pull, rebuild and restart every site; report
 prm migrate <site> <domains> --code <dir> --db <dump> [--files <dir>] [--from-site <dir>]
             [--docroot <path>] [--size S]
 prm migrate-static <site> <domains> --code <dir> [--docroot <path>]   plain HTML: nginx only
+prm route <site> <path>... --on <host-site>   serve <path>/* of another site's hostnames from <site>
 prm edge up|down|reload|logs|ps|restart
 prm <site> up|down|restart|ps|logs|stats|deploy|sh
 prm <site> backup | restore <db-file.sql.gz>
 prm <site> composer|drush|npm|npx ...  composer/npm run as app/'s owner, drush as www-data
 prm <site> exec <service> <cmd>     prm <site> compose <any docker compose args>
+prm <site> run <command...>          python sites: a one-off command in the app's image
 ```
 
 ## Layout
@@ -370,8 +403,9 @@ bin/prm               the CLI (bash, no dependencies beyond docker + openssl)
 edge/                  shared Caddy proxy (one per host); sites/<name>.caddy generated per site
 stack/                 the per-site compose file, nginx/mariadb config, hardening overlay
 images/php/            php-fpm image (runtime) + tools image (composer, git)
+images/python/         python image for --type python (requirements.txt baked in; code mounted)
 scripts/               VPS bootstrap, systemd backup timer
-examples/              hello (smoke test), static, drupal, headless-spa (Rail Baron shape)
+examples/              hello (smoke test), static, python, drupal, headless-spa (Rail Baron shape)
 sites/                 per-site state: app/, files/, secrets/, backups/, site.env (gitignored)
 docs/                  architecture, sizing, operations, local dev, trying it on macOS; logo.svg
 ```
