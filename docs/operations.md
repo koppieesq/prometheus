@@ -18,6 +18,9 @@ sudo systemctl enable --now prm-backup@blog.timer
 A static site (`--type static`) has no database: its backup is `backups/app-<ts>.tar.gz`, the whole of
 `app/`, with the same retention. There is nothing to restore into; unpack it over `app/`.
 
+A python site's backup is `backups/data-<ts>.tar.gz`: its `data/` directory. `app.env` holds secrets and, like
+`secrets/`, is not in it; keep a copy of it somewhere safe.
+
 **Backups on the same disk are not backups.** Set `PRM_BACKUP_HOOK` to a script that receives
 `<site> <backups-dir>` and pushes offsite (restic, rclone, rsync). Test a restore on a scratch site.
 Also back up `sites/<name>/secrets/` and the Caddy `caddy_data` volume (or accept re-issuing certs).

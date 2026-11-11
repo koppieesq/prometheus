@@ -17,6 +17,9 @@ jobs:
           docker compose --env-file /tmp/ci.env -f stack/compose.yaml -f stack/compose.hardened.yaml config -q
           docker compose --env-file /tmp/ci.env -f stack/compose.static.yaml config -q
           docker compose --env-file /tmp/ci.env -f stack/compose.static.yaml -f stack/compose.static.hardened.yaml config -q
+          mkdir -p /tmp/ci/app && touch /tmp/ci/app.env && printf "APP_COMMAND=true\n" >> /tmp/ci.env
+          docker compose --env-file /tmp/ci.env -f stack/compose.python.yaml config -q
+          docker compose --env-file /tmp/ci.env -f stack/compose.python.yaml -f stack/compose.python.hardened.yaml config -q
       - name: compose config (edge)
         run: ACME_EMAIL=ci@example.com docker compose -f edge/compose.yaml config -q
 
@@ -86,3 +89,50 @@ jobs:
       - name: logs on failure
         if: failure()
         run: bin/prm old logs --tail 100
+
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        hardened: ["0", "1"]
+    env:
+      PRM_HARDENED: ${{ matrix.hardened }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: create a python site from the example
+        run: |
+          bin/prm new py py.example.com --type python --example python --command "python main.py"
+          echo EXAMPLE_SECRET=hunter2 > sites/py/app.env
+      - name: up
+        run: bin/prm py up --wait --wait-timeout 180
+      - name: the app runs with its packages, data dir and environment
+        run: |
+          out="$(bin/prm py exec -T app python -c "import urllib.request as u; print(u.urlopen('http://127.0.0.1:8000/x').read().decode())")"
+          echo "$out"
+          echo "$out" | grep -q 'python: ok'
+          echo "$out" | grep -q 'deps: ok'
+          echo "$out" | grep -q 'data: ok'
+          echo "$out" | grep -q 'secret: set'
+      - name: the code is read-only and a one-off command can write data
+        run: |
+          if bin/prm py exec -T app sh -c 'touch /app/should-fail' 2>/dev/null; then echo "app/ is writable"; exit 1; fi
+          bin/prm py run python -c "open('/data/touched', 'w').write('x')"
+          test -f sites/py/data/touched
+      - name: only the app runs
+        run: '[ "$(docker ps -q --filter label=com.docker.compose.project=py | wc -l)" = 1 ]'
+      - name: backup
+        run: |
+          bin/prm py backup
+          tar -tzf sites/py/backups/data-*.tar.gz | grep -q touched
+      - name: a route puts the app under another site's hostname, and the edge config is valid
+        run: |
+          bin/prm new host host.example.com --type static --example static
+          bin/prm route py /chat --on host
+          grep -q 'reverse_proxy py-web:8000' edge/sites/host.d/py.caddy
+          docker run --rm -e ACME_EMAIL=ci@example.com \
+            -v "$PWD/edge/Caddyfile:/etc/caddy/Caddyfile:ro" -v "$PWD/edge/sites:/etc/caddy/sites:ro" \
+            caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile
+      - name: logs on failure
+        if: failure()
+        run: bin/prm py logs --tail 100

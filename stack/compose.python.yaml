@@ -1,0 +1,55 @@
+# A Python service: one container, no nginx, php or database.
+# Used instead of compose.yaml when a site's APP_TYPE is `python` (prm picks it).
+# FastAPI, Flask, a bot with an HTTP endpoint: anything started by a command that listens on a port.
+#
+#   prm new bot bot.example.com --type python
+#   $EDITOR sites/bot/app.env        # the app's environment (API keys...), kept out of git
+#   prm bot up && prm edge reload
+#
+# The code is bind-mounted read-only from sites/<name>/app. Dependencies are baked into the image
+# from requirements.txt (rebuilt by `prm <site> up` / `deploy` when it changes). The one writable
+# path is /data (sites/<name>/data), exported to the app as PRM_DATA_DIR.
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+services:
+  app:
+    restart: unless-stopped
+    init: true
+    logging: *logging
+    security_opt: ["no-new-privileges:true"]
+    build:
+      context: ../images/python
+      args: { PYTHON_VERSION: "${PYTHON_VERSION:-3.12}" }
+      additional_contexts:
+        site: ${SITE_DIR:?run via bin/prm}/app/${PROJECT_DIR:-.}
+    command: ["sh", "-c", "exec ${APP_COMMAND:?set APP_COMMAND in site.env}"]
+    working_dir: /app/${PROJECT_DIR:-.}
+    env_file: ${SITE_DIR}/app.env
+    environment:
+      TZ: ${TZ:-UTC}
+      HOME: /tmp
+      PORT: "${APP_PORT:-8000}"
+      PRM_DATA_DIR: /data
+    volumes:
+      - ${SITE_DIR}/app:/app:ro
+      - ${SITE_DIR}/data:/data
+    tmpfs:
+      - /tmp:size=64m
+    networks:
+      edge:
+        aliases: ["${SITE_NAME:?run via bin/prm}-web"]
+    mem_limit: ${APP_MEM_LIMIT:-512m}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, socket; socket.create_connection(('127.0.0.1', int(os.environ['PORT'])), 2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+
+networks:
+  edge:
+    name: ${EDGE_NETWORK:-edge}
+    external: true

@@ -2,6 +2,7 @@
 /sites/*
 !/sites/.gitkeep
 /edge/sites/*.caddy
+/edge/sites/*.d/
 /edge/.env
 *.env
 !*.env.example

@@ -1,0 +1,5 @@
+# The PRM_HARDENED=1 overlay for python sites. The app needs no capabilities: it listens on a high port.
+services:
+  app:
+    cap_drop: [ALL]
+    pids_limit: 256

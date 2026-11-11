@@ -10,6 +10,13 @@
 - **static sites** (`APP_TYPE=static`): the stack is `web` alone, from `stack/compose.static.yaml` instead of
   `compose.yaml`. No `php`, `db`, secrets or uploads mount; the whole `app/` is served read-only. `prm` picks
   the compose file, so every site command (`up`, `logs`, `backup`...) works as usual.
+- **python sites** (`APP_TYPE=python`): the stack is one `app` container, from `stack/compose.python.yaml` and
+  `images/python`. The image holds the interpreter and `requirements.txt`'s packages; the code is bind-mounted
+  read-only, `data/` is the one writable path, and `app.env` carries the app's own environment. Caddy proxies
+  straight to `<site>-web:<APP_PORT>` (the app container carries that alias).
+- **routes** (`prm route`): `edge/sites/<host>.d/<site>.caddy` holds `handle` blocks that send paths of another
+  site's hostnames to a service. The host's snippet imports that directory; Caddy routes by path, so
+  `/chat/*` does not capture `/chatbot`.
 - **profiles**: `cache` (valkey), `cron` (periodic command), `ws` (Node websocket). Tooling containers
   (`tools`: composer/drush, `node`: npm) exist only for `prm <site> composer|drush|npm`.
 
