@@ -382,13 +382,15 @@ prm new <site> <domains> [--type T] [--size S] [--example E] [--dir D] [--spa-ro
 prm demo <name>                     throwaway Drupal site on <name>.localhost
 prm ls
 prm rm <site>                       delete a site: containers, volumes, files, edge route
-prm all <command> [args]            run a site command against every site
-prm update                          pull, rebuild and restart every site; report PHP versions
+prm all [--type T[,T...]] <command> [args]   run a site command against every site (of those types)
+prm update [--no-cache]             security updates: pull every image (php, nginx, mariadb, caddy...),
+                                    rebuild php, recreate what was running, then `prm versions`
+prm versions                        php/python, nginx and Drupal core per site, and the edge's caddy
 prm migrate <site> <domains> --code <dir> --db <dump> [--files <dir>] [--from-site <dir>]
             [--docroot <path>] [--size S]
 prm migrate-static <site> <domains> --code <dir> [--docroot <path>]   plain HTML: nginx only
 prm route <site> <path>... --on <host-site>   serve <path>/* of another site's hostnames from <site>
-prm edge up|down|reload|logs|ps|restart
+prm edge up|down|reload|logs|ps|restart|pull
 prm <site> up|down|restart|ps|logs|stats|deploy|sh
 prm <site> backup | restore <db-file.sql.gz>
 prm <site> composer|drush|npm|npx ...  composer/npm run as app/'s owner, drush as www-data
@@ -419,6 +421,8 @@ docs/                  architecture, sizing, operations, local dev, trying it on
 - App code is mounted **read-only** into nginx and php-fpm; only the uploads dir is writable.
 - `PRM_HARDENED=1` drops all Linux capabilities except those each image needs (opt-in until CI has proven it).
 - Security headers and HSTS are set at the edge, one place for every site.
+- Patching is `prm update` (every image, every site, the edge) and `prm versions` to prove it. Drupal
+  core is code, so it is a `composer update` + `deploy`. Runbook: [docs/operations.md](docs/operations.md#security-updates-the-routine).
 
 ## License
 

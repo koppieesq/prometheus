@@ -68,3 +68,6 @@ variables for substitution in the compose file, not environment for the services
 
 Valkey: install `drupal/redis` and set `$settings['redis.connection']['host'] = getenv('REDIS_HOST');`.
 Cron: the `cron` profile runs `vendor/bin/drush cron` every 15 minutes; disable Drupal's automated_cron.
+
+Core security releases: `composer update "drupal/core-*" --with-all-dependencies`, then deploy. For
+the whole fleet and for sites not tracked in git, see "Drupal core" in [docs/operations.md](../../docs/operations.md#drupal-core).

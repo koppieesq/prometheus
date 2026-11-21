@@ -5,12 +5,13 @@
 #   prm demo <name>                     throwaway Drupal site on <name>.localhost, installed and serving
 #   prm ls
 #   prm rm <site>                       delete a site: containers, volumes, files, edge route
-#   prm all <command> [args]            run a site command against every site
-#   prm update                          pull new base images, rebuild and restart every site
+#   prm all [--type T[,T...]] <command> [args]   run a site command against every site (or every site of a type)
+#   prm update [--no-cache]             security updates: pull every image, rebuild php, restart what was running
+#   prm versions                        what every site is running: php/python, nginx, Drupal core, and the edge's caddy
 #   prm migrate <site> <domains> --code <dir> --db <dump> [--files <dir>] [--from-site <dir>] [--docroot <path>]   import an existing site
 #   prm migrate-static <site> <domains> --code <dir> [--docroot <path>]   import an existing plain-HTML site (nginx only)
 #   prm route <site> <path>... --on <host-site>   serve <path>/* of another site's hostname from <site>
-#   prm edge up|down|reload|logs|ps
+#   prm edge up|down|reload|logs|ps|restart|pull
 #   prm <site> up|down|restart|ps|logs|deploy|backup|restore <file>|sh|exec|compose ...
 #   prm <site> composer|drush|npm|npx ...
 #   prm <site> run <command...>         python sites: a one-off command in the app's image, e.g. a data import
@@ -98,6 +99,8 @@ dc() { # dc <site> <compose args...>
   [ "${PRM_HARDENED:-0}" = 1 ] && files+=(-f "$hardened")
   [ -f "$SITES_DIR/$site/compose.override.yaml" ] && files+=(-f "$SITES_DIR/$site/compose.override.yaml")
   local profiles; profiles="$(envget "$env" COMPOSE_PROFILES)"
+  # PRM_EXTRA_PROFILES: `update` adds "tools" so the on-demand images are refreshed too
+  if [ -n "${PRM_EXTRA_PROFILES:-}" ]; then profiles="${profiles:+$profiles,}$PRM_EXTRA_PROFILES"; fi
   COMPOSE_PROFILES="$profiles" docker compose -p "$site" --env-file "$env" "${files[@]}" "$@"
 }
 
@@ -119,8 +122,11 @@ ensure_db() { # drush and deploy both talk to the database; starting it is not t
   dc "$1" up -d --build --wait db
 }
 
+edge_dc() { docker compose -p prm-edge --env-file "$EDGE_DIR/.env" -f "$EDGE_DIR/compose.yaml" "$@"; }
+edge_running() { [ -n "$(docker ps -q --filter label=com.docker.compose.project=prm-edge --filter status=running)" ]; }
+
 edge_reload_if_up() { # a site can be created before the edge runs, e.g. while another server holds 80/443
-  if [ -n "$(docker ps -q --filter label=com.docker.compose.project=prm-edge --filter status=running)" ]; then
+  if edge_running; then
     cmd_edge reload
   else
     info "the edge is not running; start it with: prm edge up"
@@ -386,37 +392,105 @@ site_names() { # every site with a site.env, one per line
 }
 
 cmd_all() { # run one site command against every site, without stopping at the first failure
-  [ $# -gt 0 ] || die "usage: prm all <command> [args...]   (e.g. prm all up)"
-  local site rc=0 failed=""
+  local types="" site rc=0 failed="" matched=0
+  if [ "${1:-}" = --type ]; then
+    [ $# -ge 2 ] || die "usage: prm all --type <type[,type...]> <command> [args...]"
+    types=",$2,"; shift 2
+  fi
+  [ $# -gt 0 ] || die "usage: prm all [--type T[,T...]] <command> [args...]   (e.g. prm all up, prm all --type drupal deploy)"
   for site in $(site_names); do
-    info "--- $site: $* ---"
+    if [ -n "$types" ] && [[ "$types" != *",$(envget "$(site_env "$site")" APP_TYPE generic),"* ]]; then continue; fi
+    matched=1; info "--- $site: $* ---"
     if cmd_site "$site" "$@"; then :; else rc=1; failed="$failed $site"; fi
   done
+  [ $matched = 1 ] || info "no sites${types:+ of type ${types:1:${#types}-2}}"
   [ -n "$failed" ] && info "failed:$failed"
   return $rc
 }
 
-cmd_update() { # pull new base images, rebuild, restart every site, then prove what is running
-  local site rc=0 failed="" running
+# refresh_site <site> [--no-cache]: pull and rebuild everything the site runs, then recreate
+# the containers - but only if the site was running; a site you stopped stays stopped.
+# Runs as an `if` condition (errexit is off), hence the explicit `|| return 1`s.
+# $built is cmd_update's: the PHP versions already rebuilt in this run, so that
+# twenty sites on 8.4 compile the image once, not twenty times.
+refresh_site() {
+  local site="$1" env version running; shift
+  env="$(site_env "$site")"
+  running="$(dc "$site" ps -q --status running 2>/dev/null)" || running=""
+  if is_static "$site"; then
+    dc "$site" pull || return 1
+  elif is_python "$site"; then
+    dc "$site" build --pull "$@" || return 1
+  else
+    # nginx, mariadb, valkey, node: `build --pull` never touches images that aren't built here
+    PRM_EXTRA_PROFILES=tools dc "$site" pull --ignore-buildable || return 1
+    version="$(envget "$env" PHP_VERSION 8.4)"
+    # an override may change the build, so a site that has one always builds its own
+    if [ -f "$SITES_DIR/$site/compose.override.yaml" ] || [[ "$built" != *" $version "* ]]; then
+      dc "$site" build --pull "$@" php || return 1
+      PRM_EXTRA_PROFILES=tools dc "$site" build tools || return 1   # FROM runtime: reuses the layers just built
+      built="$built$version "
+    else
+      info "prm/php:$version was already rebuilt in this run"
+    fi
+  fi
+  if [ -n "$running" ]; then
+    dc "$site" up -d --wait --wait-timeout 300 --remove-orphans || return 1   # recreates only what changed
+  else
+    info "$site is not running: its images are refreshed and 'prm $site up' will use them"
+  fi
+}
+
+refresh_edge() { # caddy terminates TLS for every site; recreating it is a sub-second blip for all of them
+  [ -f "$EDGE_DIR/.env" ] || { info "no edge/.env: skipping the edge"; return 0; }
+  info "--- edge ---"
+  edge_dc pull || return 1
+  if edge_running; then edge_dc up -d --wait || return 1; fi
+}
+
+cmd_update() { # security updates: refresh every image, rebuild php, restart what was running, then prove it
+  local nocache=() site built=" " rc=0 failed=""
+  case "${1:-}" in
+    "") ;;
+    --no-cache) nocache=(--no-cache);;   # also re-runs the Dockerfile's apt-get upgrade
+    *) die "usage: prm update [--no-cache]";;
+  esac
+  ensure_network
+  if refresh_edge; then :; else rc=1; failed="$failed edge"; fi
   for site in $(site_names); do
     info "--- $site ---"
-    if { if is_static "$site"; then dc "$site" pull; else dc "$site" build --pull; fi; } \
-       && dc "$site" up -d --remove-orphans; then :; else
-      rc=1; failed="$failed $site"; continue
-    fi
+    if refresh_site "$site" ${nocache[@]+"${nocache[@]}"}; then :; else rc=1; failed="$failed $site"; fi
   done
   [ -n "$failed" ] && info "failed:$failed"
   info "--- versions now running ---"
-  for site in $(site_names); do
-    if is_static "$site"; then printf '%-20s static (nginx only)\n' "$site"; continue; fi
-    if is_python "$site"; then
-      running="$(dc "$site" exec -T app python -c 'import platform; print(platform.python_version())' 2>/dev/null)" || running="(app not running)"
-      printf '%-20s python %s\n' "$site" "$running"; continue
-    fi
-    running="$(dc "$site" exec -T php php -r 'echo PHP_VERSION;' 2>/dev/null)" || running="(php not running)"
-    printf '%-20s php %s\n' "$site" "$running"
-  done
+  cmd_versions
   return $rc
+}
+
+cmd_versions() { # read from the live containers, not from config: proof of what is actually patched
+  local site env type dir runtime nginx drupal
+  printf '%-20s %-9s %-16s %-9s %s\n' SITE TYPE RUNTIME NGINX DRUPAL
+  for site in $(site_names); do
+    env="$(site_env "$site")"; type="$(envget "$env" APP_TYPE generic)"; dir="$(envget "$env" SITE_DIR)"
+    runtime=-; nginx=-; drupal=-
+    if is_python "$site"; then
+      runtime="$(dc "$site" exec -T app python -c 'import platform; print("python", platform.python_version())' 2>/dev/null)" \
+        || runtime="(not running)"
+    else
+      nginx="$(dc "$site" exec -T web nginx -v 2>&1 | sed -n 's|.*nginx/||p')" || nginx=""
+      [ -n "$nginx" ] || nginx="(down)"
+      if ! is_static "$site"; then
+        runtime="$(dc "$site" exec -T php php -r 'echo "php ", PHP_VERSION;' 2>/dev/null)" || runtime="(not running)"
+      fi
+    fi
+    # Drupal core as installed on disk; php only loads it after `prm <site> deploy` restarts it
+    drupal="$(sed -n "s/.*const VERSION = '\([^']*\)'.*/\1/p" "$dir/app/$(envget "$env" DOCROOT public)/core/lib/Drupal.php" 2>/dev/null | head -n1)" || drupal=""
+    printf '%-20s %-9s %-16s %-9s %s\n' "$site" "$type" "$runtime" "$nginx" "${drupal:--}"
+  done
+  if [ -f "$EDGE_DIR/.env" ]; then
+    local caddy; caddy="$(edge_dc exec -T caddy caddy version 2>/dev/null)" || caddy="(not running)"
+    printf '%-20s %-9s %s\n' "(edge)" caddy "${caddy%% *}"
+  fi
 }
 
 cmd_migrate() { # lift one site out of an existing (multi)site onto this host
@@ -764,13 +838,12 @@ cmd_edge() {
   local sub="${1:-}"; shift || true
   [ -f "$EDGE_DIR/.env" ] || die "create $EDGE_DIR/.env first (cp edge/.env.example edge/.env)"
   ensure_network
-  local ec=(docker compose -p prm-edge --env-file "$EDGE_DIR/.env" -f "$EDGE_DIR/compose.yaml")
   case "$sub" in
-    up)     "${ec[@]}" up -d;;
-    down)   "${ec[@]}" down;;
-    reload) "${ec[@]}" exec -w /etc/caddy caddy caddy reload --config /etc/caddy/Caddyfile;;
-    logs|ps|restart) "${ec[@]}" "$sub" "$@";;
-    *) die "usage: prm edge up|down|reload|logs|ps|restart";;
+    up)     edge_dc up -d;;
+    down)   edge_dc down;;
+    reload) edge_dc exec -w /etc/caddy caddy caddy reload --config /etc/caddy/Caddyfile;;
+    logs|ps|restart|pull) edge_dc "$sub" "$@";;
+    *) die "usage: prm edge up|down|reload|logs|ps|restart|pull";;
   esac
 }
 
@@ -899,7 +972,8 @@ case "${1:-}" in
   migrate) shift; cmd_migrate "$@";;
   migrate-static) shift; cmd_migrate_static "$@";;
   route) shift; cmd_route "$@";;
-  update) cmd_update;;
+  update) shift; cmd_update "$@";;
+  versions) cmd_versions;;
   ls)   cmd_ls;;
   rm)   shift; cmd_rm "$@";;
   edge) shift; cmd_edge "$@";;

@@ -2,11 +2,18 @@
 ARG PHP_VERSION=8.4
 
 # ---- runtime: what production runs ------------------------------------------
-# Bookworm = Debian 12
+# PHP_VERSION is a floating tag (8.4 = the newest 8.4.x), so a PHP security
+# release needs no edit here: `prm update` pulls the new base and rebuilds.
+# -trixie pins the Debian under PHP to Debian 13; moving to the next Debian
+# release is a deliberate change to this line.
 FROM php:${PHP_VERSION}-fpm-trixie AS runtime
 
 ADD --chmod=0755 https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
+# upgrade: Debian security fixes published since the base image was built
+# (OpenSSL, libxml2, ICU...). This layer only re-runs when the base image changes
+# or on `prm update --no-cache`; that is the way to force it.
 RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
  && apt-get install -y --no-install-recommends libfcgi-bin \
  && install-php-extensions pdo_mysql mysqli gd intl mbstring zip opcache apcu redis bcmath exif \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
