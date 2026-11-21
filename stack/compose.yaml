@@ -56,7 +56,7 @@ x-php: &php
 services:
   web:
     <<: *base
-    image: nginx:${NGINX_VERSION:-1.28}-alpine
+    image: nginx:${NGINX_VERSION:-1.30}-alpine
     depends_on:
       php: { condition: service_healthy }
     environment:
