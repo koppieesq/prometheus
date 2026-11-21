@@ -120,7 +120,7 @@ bin/prm update                 # every image, every site, plus the edge
 |---|---|---|
 | PHP (8.4.x) | pulls `php:8.4-fpm-trixie`, rebuilds `prm/php` and `prm/php-tools` | no: the tag floats to the newest 8.4.x |
 | Debian libraries in the PHP image (OpenSSL, libxml2, ICU) | the Dockerfile's `apt-get upgrade`, run on each rebuild | no; see `--no-cache` below |
-| nginx (1.28.x) | pulls `nginx:1.28-alpine` | no: the tag floats to the newest 1.28.x |
+| nginx (1.30.x) | pulls `nginx:1.30-alpine` | no, until the series reaches end of life (see below) |
 | MariaDB, Valkey, Node | pulls their tags (`11.8`, `8`, `24`) | no |
 | Caddy (the edge) | pulls `caddy:2-alpine` and recreates the edge if it is running | no |
 | Python sites | rebuilds on the newest `python:<version>-slim-trixie` | no |
@@ -136,9 +136,9 @@ can prove the fleet is patched rather than assume it:
 ```
 ==> --- versions now running ---
 SITE                 TYPE      RUNTIME          NGINX     DRUPAL
-blog                 drupal    php 8.4.28       1.28.4    11.4.13
-shop                 generic   php 8.4.28       1.28.4    -
-brochure             static    -                1.28.4    -
+blog                 drupal    php 8.4.28       1.30.7    11.4.13
+shop                 generic   php 8.4.28       1.30.7    -
+brochure             static    -                1.30.7    -
 bot                  python    python 3.12.12   -         -
 (edge)               caddy     v2.11.8
 ```
@@ -159,12 +159,24 @@ them; it removes *every* dangling image on the host, so run it yourself.
 
 ### When the fix is in a newer series than the one you run
 
-The floating tags only move within a series. If an advisory is fixed only in nginx 1.30, or you
-want to pin an exact PHP patch, change the version:
+The floating tags only move within a series, and **a series stops moving when it reaches end of
+life**. If `prm versions` still shows the old version after `prm update`, that is why.
+nginx is the usual case. A new stable series (1.28, 1.30, ...) arrives each spring, and the previous
+one gets no more releases: `nginx:1.28-alpine` froze at 1.28.3 in March 2026. PHP minors last
+longer (see below).
 
-- **Fleet-wide:** the defaults live in the compose files. Change `${NGINX_VERSION:-1.28}` in
-  `stack/compose.yaml` and `stack/compose.static.yaml`, then `prm update`.
-- **One site:** set it in `sites/<name>/site.env` (`NGINX_VERSION=1.30`, or `PHP_VERSION=8.4.28`
+To check whether a tag is still maintained, look at its last-updated date:
+
+```sh
+curl -s https://hub.docker.com/v2/repositories/library/nginx/tags/1.30-alpine | grep -o '"last_updated":"[^"]*"'
+```
+
+Then change the version:
+
+- **Fleet-wide:** the defaults live in the compose files. Change `${NGINX_VERSION:-1.30}` in
+  `stack/compose.yaml` and `stack/compose.static.yaml`, then `prm update`. Sites only override it
+  if their `site.env` sets `NGINX_VERSION` (`grep NGINX_VERSION sites/*/site.env`).
+- **One site:** set it in `sites/<name>/site.env` (`NGINX_VERSION=1.31`, or `PHP_VERSION=8.4.28`
   to pin an exact PHP patch: `php:8.4.28-fpm-trixie` is a real tag), then `prm update` or
   `prm <site> up`. A pinned site stops receiving patches until you move the pin, so unpin it
   afterwards.

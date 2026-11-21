@@ -15,7 +15,7 @@ services:
     init: true
     logging: *logging
     security_opt: ["no-new-privileges:true"]
-    image: nginx:${NGINX_VERSION:-1.28}-alpine
+    image: nginx:${NGINX_VERSION:-1.30}-alpine
     environment:
       NGINX_ENVSUBST_FILTER: "^(DOCROOT)$$"
       DOCROOT: ${DOCROOT:-.}
