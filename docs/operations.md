@@ -103,35 +103,104 @@ entry first.
 
 ## Upgrades
 
-### A PHP security patch (8.4.27 -> 8.4.28)
+### Security updates: the routine
 
-This is the common case, and it needs **no change to any site.env**: the patch ships inside the same
-`php:8.4-fpm-trixie` tag the image already builds from.
-
-The `-trixie` suffix pins the operating system under PHP to Debian 13 ("trixie"). The bare `8.4-fpm` tag
-follows whatever Debian is current, so a new Debian release would change system libraries (OpenSSL,
-ICU, libxml) and package names under you. With the pin, moving to the next Debian release is a
-deliberate one-line change to `images/php/Dockerfile`, followed by `prm update`.
+When advisories land for PHP, nginx, OpenSSL, Caddy or Drupal core, this is the whole job:
 
 ```sh
-bin/prm update        # every site: pull new base images, rebuild, recreate, then report versions
+bin/prm versions               # before: what is actually running
+bin/prm all backup             # cheap insurance; MariaDB may be recreated too
+bin/prm update                 # every image, every site, plus the edge
+# Drupal core is code, not an image: see "Drupal core" below
 ```
 
-It finishes with what each site is actually running, so you can prove the fleet is patched rather
-than assume it:
+`prm update` does this, site by site:
+
+| What | How | Needs an edit? |
+|---|---|---|
+| PHP (8.4.x) | pulls `php:8.4-fpm-trixie`, rebuilds `prm/php` and `prm/php-tools` | no: the tag floats to the newest 8.4.x |
+| Debian libraries in the PHP image (OpenSSL, libxml2, ICU) | the Dockerfile's `apt-get upgrade`, run on each rebuild | no; see `--no-cache` below |
+| nginx (1.28.x) | pulls `nginx:1.28-alpine` | no: the tag floats to the newest 1.28.x |
+| MariaDB, Valkey, Node | pulls their tags (`11.8`, `8`, `24`) | no |
+| Caddy (the edge) | pulls `caddy:2-alpine` and recreates the edge if it is running | no |
+| Python sites | rebuilds on the newest `python:<version>-slim-trixie` | no |
+
+Then it recreates only the containers whose image changed and waits until they are healthy. A site
+that was **stopped stays stopped**: its images are refreshed and its next `prm <site> up` uses them.
+The PHP image is compiled once per `PHP_VERSION`, not once per site. Recreating a container is a
+restart of a few seconds. The edge's restart is a sub-second blip for every site.
+
+It finishes by running `prm versions`, which reads each version from the live containers, so you
+can prove the fleet is patched rather than assume it:
 
 ```
 ==> --- versions now running ---
-blog                 php 8.4.28
-shop                 php 8.4.28
+SITE                 TYPE      RUNTIME          NGINX     DRUPAL
+blog                 drupal    php 8.4.28       1.28.4    11.4.13
+shop                 generic   php 8.4.28       1.28.4    -
+brochure             static    -                1.28.4    -
+bot                  python    python 3.12.12   -         -
+(edge)               caddy     v2.11.8
 ```
 
-One site at a time is `prm <site> pull && prm <site> up`. A bare `prm <site> up` usually suffices —
-buildkit re-resolves the base tag against the registry on each build — but `update` passes `--pull`
-so it does not depend on that.
+`prm update` keeps going when a site fails (a pull, a build, or a container that never becomes
+healthy), lists the failures at the end, and exits non-zero. Check those sites before you call the
+incident closed.
 
-`prm update` keeps going when a site fails, lists the failures at the end, and exits non-zero. Check
-those sites before you call the incident closed.
+**`--no-cache`.** Docker reuses the cached layer holding `apt-get upgrade` and the compiled
+extensions until the PHP base image changes. A PHP release changes it, but a Debian-only fix (an
+OpenSSL advisory, say) may reach Debian before the official PHP image is rebuilt. `prm update
+--no-cache` rebuilds from scratch and picks it up. It takes a few minutes per `PHP_VERSION`.
+
+**Disk.** Each refresh leaves the superseded images behind, untagged. `docker image prune` removes
+them; it removes *every* dangling image on the host, so run it yourself.
+
+**One site only:** `prm <site> pull && prm <site> build --pull && prm <site> up`.
+
+### When the fix is in a newer series than the one you run
+
+The floating tags only move within a series. If an advisory is fixed only in nginx 1.30, or you
+want to pin an exact PHP patch, change the version:
+
+- **Fleet-wide:** the defaults live in the compose files. Change `${NGINX_VERSION:-1.28}` in
+  `stack/compose.yaml` and `stack/compose.static.yaml`, then `prm update`.
+- **One site:** set it in `sites/<name>/site.env` (`NGINX_VERSION=1.30`, or `PHP_VERSION=8.4.28`
+  to pin an exact PHP patch: `php:8.4.28-fpm-trixie` is a real tag), then `prm update` or
+  `prm <site> up`. A pinned site stops receiving patches until you move the pin, so unpin it
+  afterwards.
+
+### Drupal core
+
+Core is in each site's `composer.lock`, not in an image, so `prm update` does not touch it.
+`prm versions` shows each site's core version (read from `core/lib/Drupal.php`).
+
+**The site's code is a git clone (the normal case).** Update the lock where you develop, then
+deploy:
+
+```sh
+# in the site's repository (DDEV: ddev composer ...)
+composer update "drupal/core-*" --with-all-dependencies
+git commit -am "Drupal core security update" && git push
+
+# on the VPS, per site
+git -C sites/blog/app pull
+bin/prm blog composer install --no-dev
+bin/prm blog deploy                  # drush deploy: updatedb, config:import, cache:rebuild; restarts php
+```
+
+**The code isn't tracked in git** (e.g. the per-site copies `prm migrate` made of a multisite).
+Update in place. `--type` limits `prm all` to the Drupal sites:
+
+```sh
+bin/prm all --type drupal,headless backup
+bin/prm all --type drupal,headless composer update "drupal/core-*" --with-all-dependencies --no-dev
+bin/prm all --type drupal,headless deploy
+bin/prm versions
+```
+
+Keep the quotes around `"drupal/core-*"` so the shell doesn't expand it. `deploy` is required, not
+optional: it runs the database updates, and with `PHP_OPCACHE_VALIDATE=0` php keeps serving the old
+core from opcache until it restarts.
 
 ### A PHP minor version (8.4 -> 8.5)
 
@@ -141,13 +210,14 @@ Per site, because it can break application code: set `PHP_VERSION` in `sites/<na
 ### Everything else
 
 - **MariaDB**: bump `MARIADB_VERSION` one minor series at a time; `MARIADB_AUTO_UPGRADE` is on. Back up first.
-- **nginx / valkey**: `prm <site> pull && prm <site> up`, or fleet-wide with `prm update`.
+- **nginx / valkey / Caddy** patch releases: `prm update`. Newer series: see above.
 - **Host**: unattended-upgrades handles OS security patches; reboot occasionally for kernel updates.
 
 ### Running one command everywhere
 
 `prm all <command>` runs any site command against every site — `prm all ps`, `prm all backup`,
-`prm all restart`. Like `update`, it does not stop at the first failure and names what failed.
+`prm all restart`. `prm all --type drupal,headless <command>` limits it to sites of those types. Like
+`update`, it does not stop at the first failure and names what failed.
 
 ## Troubleshooting
 
