@@ -13,6 +13,7 @@
 #   prm route <site> <path>... --on <host-site>   serve <path>/* of another site's hostname from <site>
 #   prm edge up|down|reload|logs|ps|restart|pull
 #   prm monitor up|down|logs|ps|restart|pull   Uptime Kuma on MONITOR_DOMAIN (monitor/.env), watching the containers
+#   prm monitor sync [--dry-run]       add every site to Kuma: a group per site, its URL and each of its containers
 #   prm <site> up|down|restart|ps|logs|deploy|backup|restore <file>|sh|exec|compose ...
 #   prm <site> composer|drush|npm|npx ...
 #   prm <site> run <command...>         python sites: a one-off command in the app's image, e.g. a data import
@@ -859,6 +860,54 @@ cmd_edge() {
   esac
 }
 
+site_domain() { # the first hostname of a site's edge route, or nothing
+  grep -m1 -o '^[^ ,{]*' "$EDGE_DIR/sites/$1.caddy" 2>/dev/null || true
+}
+monitor_plan() { # what `prm monitor sync` makes sure Kuma has; the line format is described in monitor/sync.js
+  local site domain accepted c f path paths
+  for site in $(site_names); do
+    domain="$(site_domain "$site")"
+    printf 'group\t%s\n' "${domain:-$site}"
+    if [ -n "$domain" ]; then
+      # a python app may have nothing at /: any answer from it means it is up (the edge says 502 when it is not)
+      accepted=200-299; if is_python "$site"; then accepted=200-499; fi
+      printf 'http\t%s\t%s\t%s\n' "$domain" "https://$domain/" "$accepted"
+      for f in "$EDGE_DIR/sites/$site.d"/*.caddy; do   # paths other sites serve on this hostname (prm route)
+        [ -e "$f" ] || continue
+        read -ra paths <<< "$(sed -n 's/^@prm_[^ ]* path //p' "$f")"   # read -a: "/chat/*" is never globbed
+        for path in ${paths[@]+"${paths[@]}"}; do
+          path="${path%\*}"
+          printf 'http\t%s\t%s\t200-499\n' "$domain$path" "https://$domain$path"
+        done
+      done
+    fi
+    for c in $(docker ps -a --filter "label=com.docker.compose.project=$site" --filter label=com.docker.compose.oneoff=False \
+                 --format '{{.Names}}' | sort); do
+      printf 'docker\t%s\n' "$c"
+    done
+  done
+  if [ -n "$(docker ps -aq --filter name='^prm-edge-caddy-1$')" ]; then
+    printf 'group\tedge\ndocker\tprm-edge-caddy-1\n'
+  fi
+}
+cmd_monitor_sync() {
+  local dry="" user pass token plan
+  case "${1:-}" in "") ;; --dry-run) dry=1;; *) die "usage: prm monitor sync [--dry-run]";; esac
+  plan="$(monitor_plan)"
+  [ -n "$plan" ] || die "no sites to add"
+  if [ -n "$dry" ]; then
+    printf '%s\n' "$plan" | awk -F'\t' '$1=="group"{print $2; next} {print "  " $1 "\t" $2}'
+    return
+  fi
+  monitor_running || die "Kuma is not running: prm monitor up"
+  user="${PRM_KUMA_USER:-}"; pass="${PRM_KUMA_PASSWORD:-}"; token="${PRM_KUMA_TOKEN:-}"
+  if [ -z "$user" ]; then read -rp "Kuma username: " user </dev/tty; fi
+  if [ -z "$pass" ]; then read -rsp "Kuma password: " pass </dev/tty; echo >&2; fi
+  # credentials go in on stdin, never on a command line where ps would show them
+  { printf 'auth\t%s\t%s\t%s\n' "$user" "$pass" "$token"; printf '%s\n' "$plan"; } \
+    | monitor_dc exec -T -w /app kuma node -e "$(cat "$MONITOR_DIR/sync.js")"
+}
+
 cmd_monitor() { # Uptime Kuma behind the edge, reading container state through a read-only socket proxy
   local sub="${1:-}" domain; shift || true
   [ -f "$MONITOR_DIR/.env" ] || die "create $MONITOR_DIR/.env first (cp monitor/.env.example monitor/.env)"
@@ -886,8 +935,9 @@ EOF
       edge_reload_if_up
       monitor_dc down "$@"
       ;;
+    sync) cmd_monitor_sync "$@";;
     logs|ps|restart|pull) monitor_dc "$sub" "$@";;
-    *) die "usage: prm monitor up|down|logs|ps|restart|pull";;
+    *) die "usage: prm monitor up|down|sync|logs|ps|restart|pull";;
   esac
 }
 
