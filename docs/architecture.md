@@ -17,6 +17,10 @@
 - **routes** (`prm route`): `edge/sites/<host>.d/<site>.caddy` holds `handle` blocks that send paths of another
   site's hostnames to a service. The host's snippet imports that directory; Caddy routes by path, so
   `/chat/*` does not capture `/chatbot`.
+- **monitor** (optional, one per host, `prm monitor`): Uptime Kuma on the `edge` network (alias `prm-monitor`),
+  served on `MONITOR_DOMAIN` through `edge/sites/_monitor.caddy`. It reads container state from a
+  `tecnativa/docker-socket-proxy` that allows only read-only container queries, on an internal network that
+  only Kuma joins.
 - **profiles**: `cache` (valkey), `cron` (periodic command), `ws` (Node websocket). Tooling containers
   (`tools`: composer/drush, `node`: npm) exist only for `prm <site> composer|drush|npm`.
 

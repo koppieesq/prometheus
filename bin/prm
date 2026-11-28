@@ -12,6 +12,7 @@
 #   prm migrate-static <site> <domains> --code <dir> [--docroot <path>]   import an existing plain-HTML site (nginx only)
 #   prm route <site> <path>... --on <host-site>   serve <path>/* of another site's hostname from <site>
 #   prm edge up|down|reload|logs|ps|restart|pull
+#   prm monitor up|down|logs|ps|restart|pull   Uptime Kuma on MONITOR_DOMAIN (monitor/.env), watching the containers
 #   prm <site> up|down|restart|ps|logs|deploy|backup|restore <file>|sh|exec|compose ...
 #   prm <site> composer|drush|npm|npx ...
 #   prm <site> run <command...>         python sites: a one-off command in the app's image, e.g. a data import
@@ -26,6 +27,8 @@ STATIC_HARDENED="$ROOT/stack/compose.static.hardened.yaml"
 PYTHON_STACK="$ROOT/stack/compose.python.yaml"   # APP_TYPE=python: one app container
 PYTHON_HARDENED="$ROOT/stack/compose.python.hardened.yaml"
 EDGE_DIR="$ROOT/edge"
+MONITOR_DIR="$ROOT/monitor"
+MONITOR_ROUTE="$EDGE_DIR/sites/_monitor.caddy"   # the leading _ keeps it out of the site-name space
 DEMO_PASS="${PRM_DEMO_PASS:-admin}" # `prm demo` only; never used by a real site
 
 die()  { echo "prm: $*" >&2; exit 1; }
@@ -123,6 +126,8 @@ ensure_db() { # drush and deploy both talk to the database; starting it is not t
 }
 
 edge_dc() { docker compose -p prm-edge --env-file "$EDGE_DIR/.env" -f "$EDGE_DIR/compose.yaml" "$@"; }
+monitor_dc() { docker compose -p prm-monitor --env-file "$MONITOR_DIR/.env" -f "$MONITOR_DIR/compose.yaml" "$@"; }
+monitor_running() { [ -n "$(docker ps -q --filter label=com.docker.compose.project=prm-monitor --filter status=running)" ]; }
 edge_running() { [ -n "$(docker ps -q --filter label=com.docker.compose.project=prm-edge --filter status=running)" ]; }
 
 edge_reload_if_up() { # a site can be created before the edge runs, e.g. while another server holds 80/443
@@ -448,6 +453,12 @@ refresh_edge() { # caddy terminates TLS for every site; recreating it is a sub-s
   if edge_running; then edge_dc up -d --wait || return 1; fi
 }
 
+refresh_monitor() { # optional: only when it has been set up
+  [ -f "$MONITOR_DIR/.env" ] || return 0
+  info "--- monitor ---"
+  monitor_dc pull || return 1
+  if monitor_running; then monitor_dc up -d --wait || return 1; fi
+}
 cmd_update() { # security updates: refresh every image, rebuild php, restart what was running, then prove it
   local nocache=() site built=" " rc=0 failed=""
   case "${1:-}" in
@@ -457,6 +468,7 @@ cmd_update() { # security updates: refresh every image, rebuild php, restart wha
   esac
   ensure_network
   if refresh_edge; then :; else rc=1; failed="$failed edge"; fi
+  if refresh_monitor; then :; else rc=1; failed="$failed monitor"; fi
   for site in $(site_names); do
     info "--- $site ---"
     if refresh_site "$site" ${nocache[@]+"${nocache[@]}"}; then :; else rc=1; failed="$failed $site"; fi
@@ -847,6 +859,38 @@ cmd_edge() {
   esac
 }
 
+cmd_monitor() { # Uptime Kuma behind the edge, reading container state through a read-only socket proxy
+  local sub="${1:-}" domain; shift || true
+  [ -f "$MONITOR_DIR/.env" ] || die "create $MONITOR_DIR/.env first (cp monitor/.env.example monitor/.env)"
+  domain="$(envget "$MONITOR_DIR/.env" MONITOR_DOMAIN)"
+  ensure_network
+  case "$sub" in
+    up)
+      [[ "$domain" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ && "$domain" == *.* ]] \
+        || die "set MONITOR_DOMAIN in $MONITOR_DIR/.env to the dashboard's hostname, e.g. status.example.com"
+      [ "$domain" != status.example.com ] || die "MONITOR_DOMAIN is still the example; set it in $MONITOR_DIR/.env"
+      monitor_dc up -d --wait "$@"
+      cat > "$MONITOR_ROUTE" <<EOF
+# Written by 'prm monitor up' from MONITOR_DOMAIN in monitor/.env. Deleted by 'prm monitor down'.
+$domain {
+	import common
+	reverse_proxy prm-monitor:3001
+}
+EOF
+      edge_reload_if_up
+      info "Uptime Kuma: https://$domain/ - create its admin account now: until you do, whoever opens it first can"
+      info "for container monitors, add the Docker host http://docker-api:2375 (Settings > Docker Hosts > TCP/HTTP)"
+      ;;
+    down)
+      rm -f "$MONITOR_ROUTE"
+      edge_reload_if_up
+      monitor_dc down "$@"
+      ;;
+    logs|ps|restart|pull) monitor_dc "$sub" "$@";;
+    *) die "usage: prm monitor up|down|logs|ps|restart|pull";;
+  esac
+}
+
 cmd_backup() {
   local site="$1" env dir ts keep kind
   env="$(site_env "$site")"; dir="$(envget "$env" SITE_DIR)"
@@ -977,5 +1021,6 @@ case "${1:-}" in
   ls)   cmd_ls;;
   rm)   shift; cmd_rm "$@";;
   edge) shift; cmd_edge "$@";;
+  monitor) shift; cmd_monitor "$@";;
   *)    site="$1"; shift; cmd_site "$site" "$@";;
 esac

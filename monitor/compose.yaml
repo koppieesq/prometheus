@@ -1,0 +1,55 @@
+# Uptime Kuma: a status dashboard for the host's sites and containers. Optional, one per host.
+#
+#   cp monitor/.env.example monitor/.env && $EDITOR monitor/.env   # MONITOR_DOMAIN
+#   prm monitor up       (starts it, writes edge/sites/_monitor.caddy, reloads the edge)
+#   prm monitor down     (stops it and removes the route; its data volume stays)
+#
+# Kuma reads container state through a socket proxy that allows only read-only container queries,
+# never the Docker socket itself: whoever holds the socket controls the host. The proxy lives on a private
+# network that only Kuma joins; no site container can reach it.
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+services:
+  kuma:
+    image: louislam/uptime-kuma:2
+    restart: unless-stopped
+    logging: *logging
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      TZ: ${TZ:-UTC}
+    volumes:
+      - kuma_data:/app/data # monitors, history, settings, accounts: back this up
+    networks:
+      edge:
+        aliases: [prm-monitor] # what the edge route proxies to; no site's alias (<site>-web) can clash with it
+      docker-api: {}
+    mem_limit: ${MONITOR_MEM_LIMIT:-512m}
+    depends_on: [docker-api]
+
+  docker-api:
+    image: tecnativa/docker-socket-proxy:latest
+    restart: unless-stopped
+    logging: *logging
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: [/run, /tmp]
+    environment:
+      CONTAINERS: 1 # GET /containers/...: what Kuma's "Docker Container" monitors read
+      POST: 0       # no starting, stopping, creating or exec'ing anything
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [docker-api]
+    mem_limit: 64m
+
+volumes:
+  kuma_data:
+
+networks:
+  edge:
+    name: ${EDGE_NETWORK:-edge}
+    external: true
+  docker-api:
+    internal: true # no route out, and nothing on it but Kuma and the proxy
