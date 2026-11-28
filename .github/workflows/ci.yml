@@ -22,6 +22,8 @@ jobs:
           docker compose --env-file /tmp/ci.env -f stack/compose.python.yaml -f stack/compose.python.hardened.yaml config -q
       - name: compose config (edge)
         run: ACME_EMAIL=ci@example.com docker compose -f edge/compose.yaml config -q
+      - name: compose config (monitor)
+        run: docker compose -f monitor/compose.yaml config -q
 
   smoke:
     runs-on: ubuntu-latest
@@ -136,3 +138,38 @@ jobs:
       - name: logs on failure
         if: failure()
         run: bin/prm py logs --tail 100
+
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: up, with the edge route written
+        run: |
+          echo MONITOR_DOMAIN=status.ci.example.com > monitor/.env
+          bin/prm monitor up
+          grep -q '^status.ci.example.com {' edge/sites/_monitor.caddy
+          grep -q 'reverse_proxy prm-monitor:3001' edge/sites/_monitor.caddy
+          docker run --rm -e ACME_EMAIL=ci@example.com \
+            -v "$PWD/edge/Caddyfile:/etc/caddy/Caddyfile:ro" -v "$PWD/edge/sites:/etc/caddy/sites:ro" \
+            caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile
+      - name: Kuma reads container state through the proxy, and nothing more
+        run: |
+          api() { docker exec prm-monitor-kuma-1 node -e "fetch('http://docker-api:2375/$1',{method:'${2:-GET}'}).then(r=>console.log(r.status))"; }
+          [ "$(api 'containers/json?all=true')" = 200 ]
+          [ "$(api containers/prm-monitor-kuma-1/json)" = 200 ]
+          [ "$(api containers/prm-monitor-kuma-1/stop POST)" = 403 ]
+          [ "$(api images/json)" = 403 ]
+          [ "$(api volumes)" = 403 ]
+      - name: the proxy is unreachable from the edge network
+        run: |
+          if docker run --rm --network edge curlimages/curl -s -m 3 http://docker-api:2375/containers/json; then
+            echo "docker-api is reachable from the edge network"; exit 1
+          fi
+      - name: down removes the route and keeps the data
+        run: |
+          bin/prm monitor down
+          test ! -e edge/sites/_monitor.caddy
+          docker volume inspect prm-monitor_kuma_data >/dev/null
+      - name: logs on failure
+        if: failure()
+        run: bin/prm monitor logs --tail 100

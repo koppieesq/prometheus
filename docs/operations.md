@@ -23,7 +23,8 @@ A python site's backup is `backups/data-<ts>.tar.gz`: its `data/` directory. `ap
 
 **Backups on the same disk are not backups.** Set `PRM_BACKUP_HOOK` to a script that receives
 `<site> <backups-dir>` and pushes offsite (restic, rclone, rsync). Test a restore on a scratch site.
-Also back up `sites/<name>/secrets/` and the Caddy `caddy_data` volume (or accept re-issuing certs).
+Also back up `sites/<name>/secrets/` and the Caddy `caddy_data` volume (or accept re-issuing certs), and, if you
+run `prm monitor`, the `prm-monitor_kuma_data` volume (or accept setting the monitors up again).
 
 ## Deploy
 

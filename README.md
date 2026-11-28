@@ -375,6 +375,12 @@ bin/prm route bot /chat --on www        # https://<www's domain>/chat/* is serve
 
 Worked example, with the cutover from a systemd service: [docs/python-apps.md](docs/python-apps.md).
 
+## Monitoring
+
+`prm monitor up` runs Uptime Kuma on a hostname of your choosing (`MONITOR_DOMAIN` in `monitor/.env`), behind
+the edge. Group monitors per site: an HTTP check on its URL, plus a container check for each of its containers,
+which is down when the container stops or is unhealthy. Setup and examples: [docs/monitoring.md](docs/monitoring.md).
+
 ## Commands
 
 ```
@@ -391,6 +397,7 @@ prm migrate <site> <domains> --code <dir> --db <dump> [--files <dir>] [--from-si
 prm migrate-static <site> <domains> --code <dir> [--docroot <path>]   plain HTML: nginx only
 prm route <site> <path>... --on <host-site>   serve <path>/* of another site's hostnames from <site>
 prm edge up|down|reload|logs|ps|restart|pull
+prm monitor up|down|logs|ps|restart|pull   Uptime Kuma on MONITOR_DOMAIN: uptime and container health per site
 prm <site> up|down|restart|ps|logs|stats|deploy|sh
 prm <site> backup | restore <db-file.sql.gz>
 prm <site> composer|drush|npm|npx ...  composer/npm run as app/'s owner, drush as www-data
@@ -403,13 +410,14 @@ prm <site> run <command...>          python sites: a one-off command in the app'
 ```
 bin/prm               the CLI (bash, no dependencies beyond docker + openssl)
 edge/                  shared Caddy proxy (one per host); sites/<name>.caddy generated per site
+monitor/               optional Uptime Kuma (one per host) and its read-only Docker socket proxy
 stack/                 the per-site compose file, nginx/mariadb config, hardening overlay
 images/php/            php-fpm image (runtime) + tools image (composer, git)
 images/python/         python image for --type python (requirements.txt baked in; code mounted)
 scripts/               VPS bootstrap, systemd backup timer
 examples/              hello (smoke test), static, python, drupal, headless-spa (Rail Baron shape)
 sites/                 per-site state: app/, files/, secrets/, backups/, site.env (gitignored)
-docs/                  architecture, sizing, operations, local dev, trying it on macOS; logo.svg
+docs/                  architecture, sizing, operations, monitoring, local dev, trying it on macOS; logo.svg
 ```
 
 ## Security notes
@@ -421,6 +429,8 @@ docs/                  architecture, sizing, operations, local dev, trying it on
 - App code is mounted **read-only** into nginx and php-fpm; only the uploads dir is writable.
 - `PRM_HARDENED=1` drops all Linux capabilities except those each image needs (opt-in until CI has proven it).
 - Security headers and HSTS are set at the edge, one place for every site.
+- `prm monitor` never mounts the Docker socket into Uptime Kuma. A proxy on a private network answers its
+  read-only container queries and refuses everything else ([docs/monitoring.md](docs/monitoring.md)).
 - Patching is `prm update` (every image, every site, the edge) and `prm versions` to prove it. Drupal
   core is code, so it is a `composer update` + `deploy`. Runbook: [docs/operations.md](docs/operations.md#security-updates-the-routine).
 
