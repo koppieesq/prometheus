@@ -165,6 +165,25 @@ jobs:
           if docker run --rm --network edge curlimages/curl -s -m 3 http://docker-api:2375/containers/json; then
             echo "docker-api is reachable from the edge network"; exit 1
           fi
+      - name: sync adds every site to Kuma, and only once
+        run: |
+          bin/prm new s1 s1.example.com --type static --example static
+          bin/prm s1 up --wait
+          k() { docker exec -w /app prm-monitor-kuma-1 node -e "$1"; }
+          k 'fetch("http://127.0.0.1:3001/setup-database",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({dbConfig:{type:"sqlite"}})}).then(r=>r.text()).then(console.log)'
+          # Kuma restarts into its normal mode after the database step; create the account once it answers
+          for i in $(seq 60); do
+            k 'const {io}=require("socket.io-client"); const s=io("http://127.0.0.1:3001",{transports:["websocket"]});
+               setTimeout(()=>process.exit(1),5000);
+               s.on("connect",()=>s.emit("setup","ci","Ci-pass-123456",r=>process.exit(r.ok||/initialized/.test(r.msg)?0:1)))' && break
+            sleep 2
+          done
+          export PRM_KUMA_USER=ci PRM_KUMA_PASSWORD=Ci-pass-123456
+          out="$(bin/prm monitor sync)"; echo "$out"
+          echo "$out" | grep -q '^+ s1.example.com'
+          echo "$out" | grep -q '+ s1-web-1'
+          bin/prm monitor sync | grep -q 'nothing to add'
+          if PRM_KUMA_PASSWORD=wrong bin/prm monitor sync; then echo "a wrong password was accepted"; exit 1; fi
       - name: down removes the route and keeps the data
         run: |
           bin/prm monitor down

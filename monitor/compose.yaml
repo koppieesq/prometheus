@@ -2,6 +2,7 @@
 #
 #   cp monitor/.env.example monitor/.env && $EDITOR monitor/.env   # MONITOR_DOMAIN
 #   prm monitor up       (starts it, writes edge/sites/_monitor.caddy, reloads the edge)
+#   prm monitor sync     (adds a group per site to Kuma: its URL and its containers; see sync.js)
 #   prm monitor down     (stops it and removes the route; its data volume stays)
 #
 # Kuma reads container state through a socket proxy that allows only read-only container queries,

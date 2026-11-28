@@ -18,20 +18,50 @@ first request.
 
 **Open the dashboard right away and create the admin account.** Until an account exists, whoever opens the page
 first gets to create it. Choose SQLite when it asks for a database; it is the lighter option and plenty for one host.
+Then run `bin/prm monitor sync` (next section) to add every site.
 
-## Connect it to Docker
+## Add every site: `prm monitor sync`
 
-In Kuma: **Settings → Docker Hosts → Setup Docker Host**, connection type **TCP / HTTP**, URL
-`http://docker-api:2375`.
+```sh
+bin/prm monitor sync --dry-run    # what it would add, without logging in
+bin/prm monitor sync              # asks for your Kuma username and password
+```
 
-That is a socket proxy, not the Docker socket itself, and it only answers read-only container queries.
-Kuma can see whether a container is running and healthy, but it cannot start, stop or exec into anything,
-or read images, volumes or secrets. The proxy sits on a private network that only Kuma joins, so no site
-container can reach it, and that network has no route to the internet.
+`sync` logs in to Kuma the way its web UI does and makes sure it has:
 
-## Monitors, grouped by site
+- a Docker host, `prometheus`, at `http://docker-api:2375` (see [below](#the-docker-host));
+- for each site, a **Group** named after its first hostname, containing
+  - an **HTTP(s)** monitor on `https://<hostname>/`, which also warns before the certificate expires. A python
+    app may have nothing at `/`, so for one any answer below 500 counts as up: the edge answers 502 when it is not;
+  - an **HTTP(s)** monitor for each path another site serves on that hostname with `prm route`, e.g.
+    `koplowiczandsons.com/chat/`, with the same any-answer rule;
+  - a **Docker Container** monitor for each of the site's containers. It is down when the container stops or its
+    healthcheck reports it unhealthy, and pending while Docker restarts it, so a crash loop shows as a monitor
+    flapping between pending and down;
+- a group `edge` for Caddy's container.
 
-Containers are named `<site>-<service>-1`:
+For example:
+
+```
+koplowiczandsons.com
+├─ koplowiczandsons.com          HTTP(s)
+├─ koplowiczandsons.com/chat/    HTTP(s), any answer below 500
+└─ kands-react-web-1             Docker Container
+koppiebot.koplowiczandsons.com
+├─ koppiebot.koplowiczandsons.com   HTTP(s), any answer below 500
+└─ koppiebot-app-1                  Docker Container
+edge
+└─ prm-edge-caddy-1              Docker Container
+```
+
+It only adds. A group or monitor that already exists, by name, is left exactly as it is, so run it again after
+`prm new` and it adds just the new site; edit or delete monitors in Kuma as you like. New monitors check every
+60 seconds, retry once before alerting, and get the notifications marked **Default enabled** in Kuma.
+
+The credentials are read from the terminal, or from `PRM_KUMA_USER` and `PRM_KUMA_PASSWORD`, and are passed to
+Kuma on stdin, never on a command line. An account with 2FA also needs `PRM_KUMA_TOKEN` set to a current code.
+
+Containers are named `<site>-<service>-1`; `bin/prm <site> ps` lists a site's:
 
 | Site type | Containers |
 |---|---|
@@ -40,23 +70,15 @@ Containers are named `<site>-<service>-1`:
 | python | `<site>-app-1` |
 | edge | `prm-edge-caddy-1` |
 
-`bin/prm <site> ps` lists a site's containers. For each site, create a **Group** monitor, then add to it:
+To check what a page says rather than that it answers, edit its HTTP monitor in Kuma into **HTTP(s) - Keyword**,
+for example `koplowiczandsons.com/chat/hello` with a 60-second timeout.
 
-- an **HTTP(s)** monitor on the site's public URL, which also warns before its certificate expires. Use
-  **HTTP(s) - Keyword** to check a page's contents, e.g. a python app's endpoint returning a known answer;
-- a **Docker Container** monitor per container, on the `docker-api` host. It is down when the container stops
-  or its healthcheck reports it unhealthy, and pending while Docker is restarting it, so a crash loop shows as
-  a monitor flapping between pending and down.
+## The Docker host
 
-For example:
-
-```
-koplowiczandsons.com (group)
-├─ https://koplowiczandsons.com/              HTTP(s)
-├─ https://koplowiczandsons.com/chat/hello    HTTP(s) - Keyword, 60s timeout
-├─ kands-react-web-1                          Docker Container
-└─ koppiebot-app-1                            Docker Container
-```
+`http://docker-api:2375` is a socket proxy, not the Docker socket itself, and it only answers read-only container
+queries. Kuma can see whether a container is running and healthy, but it cannot start, stop or exec into anything,
+or read images, volumes or secrets. The proxy sits on a private network that only Kuma joins, so no site
+container can reach it, and that network has no route to the internet.
 
 A group is down when any monitor in it is. Add a **notification** (email, Slack, ntfy...) under Settings, and
 tick it on the groups.

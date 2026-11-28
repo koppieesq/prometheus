@@ -378,8 +378,9 @@ Worked example, with the cutover from a systemd service: [docs/python-apps.md](d
 ## Monitoring
 
 `prm monitor up` runs Uptime Kuma on a hostname of your choosing (`MONITOR_DOMAIN` in `monitor/.env`), behind
-the edge. Group monitors per site: an HTTP check on its URL, plus a container check for each of its containers,
-which is down when the container stops or is unhealthy. Setup and examples: [docs/monitoring.md](docs/monitoring.md).
+the edge. `prm monitor sync` then adds every site to it: a group per site with an HTTP check on its URL, plus a
+container check for each of its containers, which is down when the container stops or is unhealthy. Run it again
+after adding a site; it only adds what is missing. Setup and examples: [docs/monitoring.md](docs/monitoring.md).
 
 ## Commands
 
@@ -398,6 +399,7 @@ prm migrate-static <site> <domains> --code <dir> [--docroot <path>]   plain HTML
 prm route <site> <path>... --on <host-site>   serve <path>/* of another site's hostnames from <site>
 prm edge up|down|reload|logs|ps|restart|pull
 prm monitor up|down|logs|ps|restart|pull   Uptime Kuma on MONITOR_DOMAIN: uptime and container health per site
+prm monitor sync [--dry-run]         add every site to Kuma: a group per site, its URL and each container
 prm <site> up|down|restart|ps|logs|stats|deploy|sh
 prm <site> backup | restore <db-file.sql.gz>
 prm <site> composer|drush|npm|npx ...  composer/npm run as app/'s owner, drush as www-data
